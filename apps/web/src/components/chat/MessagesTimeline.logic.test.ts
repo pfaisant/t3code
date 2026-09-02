@@ -12,6 +12,7 @@ import {
   shouldPreserveAssistantLineBreaks,
   type MessagesTimelineRow,
   workEntryDisplayLabel,
+  workEntryIsVisibleInGroup,
 } from "./MessagesTimeline.logic";
 
 describe("expanded tool group scrolling", () => {
@@ -465,6 +466,22 @@ describe("resolveAssistantMessageCopyState", () => {
       text: "Created [report.xlsx](<outputs/report.xlsx>).\n\nHello World (Document template)",
       visible: true,
     });
+  });
+});
+
+describe("workEntryIsVisibleInGroup", () => {
+  it("keeps an in-progress image preview row visible outside a group", () => {
+    const entry = {
+      id: "work-image",
+      createdAt: "2026-01-01T00:00:04Z",
+      turnId: "turn-1" as never,
+      label: "Image view",
+      detail: "screenshots/result.png",
+      itemType: "image_view" as const,
+      tone: "tool" as const,
+      toolLifecycleStatus: "inProgress" as const,
+    };
+    expect(workEntryIsVisibleInGroup(entry, false)).toBe(true);
   });
 });
 
