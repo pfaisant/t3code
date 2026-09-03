@@ -67,6 +67,7 @@ import {
   applyAntigravityAcpModelSelection,
   buildAntigravityPrompt,
   type AntigravityAcpRuntimeInput,
+  resolveAntigravityModel,
 } from "../acp/AntigravityAcpSupport.ts";
 import {
   antigravityApprovalOptions,
@@ -133,6 +134,8 @@ export interface AntigravityAdapterOptions {
     cwd: string,
   ) => Effect.Effect<void>;
   readonly onAuthRequired?: Effect.Effect<void>;
+  /** Model the provider default alias selects, when the account offers it. */
+  readonly defaultModel?: Effect.Effect<string | undefined>;
   readonly nativeEventLogger?: EventNdjsonLogger;
 }
 
@@ -706,6 +709,7 @@ export const makeAntigravityAdapter = Effect.fn("makeAntigravityAdapter")(functi
               const model = yield* applyAntigravityAcpModelSelection({
                 runtime,
                 model: input.modelSelection?.model,
+                defaultModel: yield* options.defaultModel ?? Effect.succeed(undefined),
                 mapError: (cause) => cause,
               });
               yield* runtime.setMode(antigravityPermissionMode(input.runtimeMode));
@@ -883,13 +887,11 @@ export const makeAntigravityAdapter = Effect.fn("makeAntigravityAdapter")(functi
           yield* requireSession(input.threadId);
           const requestedModel = input.modelSelection?.model ?? context.session.model;
           const configOptions = yield* context.runtime.getConfigOptions;
-          const currentModel = configOptions.find((option) => option.id === "model");
-          const model =
-            requestedModel === ANTIGRAVITY_DEFAULT_MODEL
-              ? currentModel?.type === "select"
-                ? currentModel.currentValue
-                : undefined
-              : requestedModel;
+          const model = resolveAntigravityModel({
+            configOptions,
+            model: requestedModel,
+            defaultModel: yield* options.defaultModel ?? Effect.succeed(undefined),
+          });
           const availableModels = antigravityModelOptions(configOptions);
           if (model && !availableModels.some((option) => option.value === model)) {
             return yield* EffectAcpErrors.AcpRequestError.invalidParams(

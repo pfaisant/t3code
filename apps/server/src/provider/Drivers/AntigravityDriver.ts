@@ -286,10 +286,14 @@ export const AntigravityDriver: ProviderDriver<AntigravitySettings, AntigravityD
             }),
         ),
       );
+      const defaultModel = modelManifest.current.pipe(
+        Effect.map((manifest) => ModelManifest.manifestDefaultModel(manifest, DRIVER)),
+      );
       const adapter = yield* makeAntigravityAdapter(settings, {
         instanceId,
         makeRuntime,
         withProcess: authFlow.withProcess,
+        defaultModel,
         onSessionStarted: provider.onSessionStarted,
         onAvailableCommands: provider.onAvailableCommands,
         onAuthRequired: provider.onAuthRequired,
@@ -297,6 +301,7 @@ export const AntigravityDriver: ProviderDriver<AntigravitySettings, AntigravityD
       });
       const textGeneration = yield* makeAntigravityTextGeneration({
         profileDirectory,
+        defaultModel,
         withProcess: authFlow.withProcess,
         makeRuntime: (cwd) =>
           makeRuntime({

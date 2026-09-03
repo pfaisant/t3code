@@ -108,6 +108,9 @@ The current official ACP exposes Gemini models only. T3 Code uses the model IDs 
 returned for your account, including any model choices with different thinking levels. Models
 available in other Antigravity apps might not be available through this agent.
 
+New threads use Gemini 3.8 Flash (High) when your account offers it. Older Gemini generations
+stay available under **Legacy models** in the picker.
+
 Threads keep their selected model when you resume them. If that model is no longer available,
 T3 Code asks you to select an available model instead of silently changing it.
 

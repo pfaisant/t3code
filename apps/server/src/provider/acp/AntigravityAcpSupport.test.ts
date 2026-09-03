@@ -94,6 +94,30 @@ describe("applyAntigravityAcpModelSelection", () => {
       }),
   );
 
+  it.effect("selects the manifest default for the alias when the account offers it", () =>
+    Effect.gen(function* () {
+      const { runtime, selections } = makeModelRuntime();
+      const model = yield* applyAntigravityAcpModelSelection({
+        runtime,
+        model: ANTIGRAVITY_DEFAULT_MODEL,
+        defaultModel: "gemini-saved",
+        mapError: (cause) => cause,
+      });
+      expect(model).toBe("gemini-saved");
+      expect(selections).toEqual(["gemini-saved"]);
+
+      const { runtime: other, selections: otherSelections } = makeModelRuntime();
+      const fallback = yield* applyAntigravityAcpModelSelection({
+        runtime: other,
+        model: ANTIGRAVITY_DEFAULT_MODEL,
+        defaultModel: "gemini-not-offered",
+        mapError: (cause) => cause,
+      });
+      expect(fallback).toBe("gemini-default");
+      expect(otherSelections).toEqual([]);
+    }),
+  );
+
   it.effect.each(["gemini-removed", "Gemini saved", "gemini-saved[reasoning=high]"])(
     "rejects unavailable or non-native model ID %s without selecting a fallback",
     (model) =>
