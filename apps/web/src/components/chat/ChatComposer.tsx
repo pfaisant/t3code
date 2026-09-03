@@ -3919,8 +3919,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                 runtimeMode={runtimeMode}
                 size="xs"
                 showInteractionModeToggle={
-                  planModeUiEnabled &&
-                  hiddenRestingBlockIds.includes("mode")
+                  planModeUiEnabled && hiddenRestingBlockIds.includes("mode")
                 }
                 traitsMenuContent={
                   hiddenRestingBlockIds.includes("traits") ? providerTraitsMenuContent : undefined
