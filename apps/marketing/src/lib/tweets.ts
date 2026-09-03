@@ -23,8 +23,7 @@ export const tweets = [
     handle: "ryanrhughes",
     content:
       "I think I've finally found the one AI harness to steal me away from the terminal — @t3dotcodes.",
-    excerpt:
-      "I think I've finally found the one AI harness to steal me away from the terminal",
+    excerpt: "I think I've finally found the one AI harness to steal me away from the terminal",
     link: "https://x.com/ryanrhughes/status/2093051703616573769",
   },
   {
@@ -49,8 +48,7 @@ export const tweets = [
     handle: "JoshuaRileyDev",
     content:
       "Well I was 2,000 miles away on holiday and able to do iOS development from just my phone, T3 Code’s remote feature is a magical experience",
-    excerpt:
-      "I was 2,000 miles away on holiday and able to do iOS development from just my phone",
+    excerpt: "I was 2,000 miles away on holiday and able to do iOS development from just my phone",
     link: "https://x.com/JoshuaRileyDev/status/2094379365408616837",
   },
   {
