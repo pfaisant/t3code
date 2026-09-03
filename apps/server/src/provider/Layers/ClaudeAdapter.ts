@@ -3781,6 +3781,11 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       ),
     );
 
+  // Synthetic turns (background agent output between prompts) never get a
+  // result and are closed by the next send, so silence there is normal.
+  const isWatchedTurn = (turnState: ClaudeTurnState | undefined): turnState is ClaudeTurnState =>
+    turnState !== undefined && turnState.synthetic !== true;
+
   const handleStreamExit = Effect.fn("handleStreamExit")(function* (
     context: ClaudeSessionContext,
     exit: Exit.Exit<void, ProviderAdapterProcessError>,
@@ -3805,7 +3810,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         });
         yield* completeTurn(context, "failed", message);
       }
-    } else if (context.turnState) {
+    } else if (isWatchedTurn(context.turnState)) {
       // The CLI ended its stream on its own mid-turn (our own stop sets
       // `stopped` first and never reaches here). Settling that as a quiet
       // "interrupted" left the thread reading Done with no answer.
@@ -3813,6 +3818,10 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         "Claude exited before finishing the turn. Send your message again to restart it.";
       yield* emitRuntimeError(context, message);
       yield* completeTurn(context, "failed", message);
+    } else if (context.turnState) {
+      // A leftover synthetic turn never gets a result; the user's real turn
+      // already succeeded, so a later CLI exit is not a failure to report.
+      yield* completeTurn(context, "interrupted", "Claude runtime stream ended.");
     }
 
     yield* stopSessionInternal(context, {
@@ -3961,15 +3970,20 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     const message = claudeStalledTurnMessage(timeout.milliseconds);
     yield* emitRuntimeError(context, message);
     yield* completeTurn(context, "failed", message);
+    // A close() that throws leaves the session in place, exactly as a failed
+    // interrupt does; the turn is already failed, and the watchdog must stay
+    // alive to guard the next turn on that CLI rather than die with the error.
     yield* stopSessionInternal(context, {
       emitExitEvent: true,
-    });
+    }).pipe(
+      Effect.catchCause((cause) =>
+        Effect.logWarning("Failed to close the stalled Claude session.", {
+          threadId: context.session.threadId,
+          cause,
+        }),
+      ),
+    );
   });
-
-  // Synthetic turns (background agent output between prompts) never get a
-  // result and are closed by the next send, so silence there is normal.
-  const isWatchedTurn = (turnState: ClaudeTurnState | undefined): turnState is ClaudeTurnState =>
-    turnState !== undefined && turnState.synthetic !== true;
 
   const runTurnLivenessWatchdog = Effect.fn("runTurnLivenessWatchdog")(
     function* (context: ClaudeSessionContext) {

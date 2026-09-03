@@ -2976,6 +2976,55 @@ describe("ClaudeAdapterLive", () => {
     );
   });
 
+  it.effect("keeps watching the CLI when closing a stalled session fails", () => {
+    const harness = makeHarness({ turnInactivityTimeoutMs: 1_000 });
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const completions: Array<Extract<ProviderRuntimeEvent, { type: "turn.completed" }>> = [];
+      const firstCompletion = yield* Deferred.make<void>();
+      const secondCompletion = yield* Deferred.make<void>();
+      const runtimeEventsFiber = yield* Stream.runForEach(adapter.streamEvents, (event) =>
+        Effect.gen(function* () {
+          if (event.type !== "turn.completed") return;
+          completions.push(event);
+          yield* Deferred.succeed(
+            completions.length === 1 ? firstCompletion : secondCompletion,
+            undefined,
+          ).pipe(Effect.ignore);
+        }),
+      ).pipe(Effect.forkChild);
+
+      yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+      harness.query.closeError = new Error("close failed");
+
+      yield* adapter.sendTurn({ threadId: THREAD_ID, input: "hello", attachments: [] });
+      yield* settleFibers;
+      yield* TestClock.adjust("1 second");
+      yield* Deferred.await(firstCompletion).pipe(Effect.timeout("2 seconds"), TestClock.withLive);
+      yield* settleFibers;
+      assert.equal(completions[0]?.payload.state, "failed");
+      // Same shape as a failed interrupt: the session stays put when close() throws.
+      assert.equal(harness.query.closeCalls, 1);
+      assert.equal(yield* adapter.hasSession(THREAD_ID), true);
+
+      // The watchdog survived the failed close and guards the next turn too.
+      yield* adapter.sendTurn({ threadId: THREAD_ID, input: "again", attachments: [] });
+      yield* settleFibers;
+      yield* TestClock.adjust("1 second");
+      yield* Deferred.await(secondCompletion).pipe(Effect.timeout("2 seconds"), TestClock.withLive);
+      yield* Fiber.interrupt(runtimeEventsFiber);
+      assert.equal(completions[1]?.payload.state, "failed");
+      assert.equal(harness.query.closeCalls, 2);
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
   it.effect("drops back to the short deadline once the tool result arrives", () => {
     const harness = makeHarness({
       turnInactivityTimeoutMs: 1_000,
