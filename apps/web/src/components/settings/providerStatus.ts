@@ -87,7 +87,9 @@ export function getProviderSummary(provider: ServerProvider | undefined) {
  */
 export function getProviderVersionLabel(version: string | null | undefined) {
   if (!version) return null;
-  return version.startsWith("v") ? version : `v${version}`;
+  // Only bare semver-like versions get a `v` prefix. Release tags such as
+  // Antigravity's `agy_acp_server_20260818_01_RC01` are shown as-is.
+  return /^\d/.test(version) ? `v${version}` : version;
 }
 
 export function getProviderVersionAdvisoryPresentation(
