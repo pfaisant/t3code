@@ -155,6 +155,10 @@ export const makeAntigravityProvider = Effect.fn("makeAntigravityProvider")(func
     draft: initialDraft,
     authRevision: 0,
   });
+  // Skills the driver discovered on disk per workspace. Session callbacks
+  // rewrite the workspace entry with native commands and must keep these, or
+  // the registry drops the suggestions and never re-reads the workspace.
+  const discoveredSkills = new Map<string, ServerProvider["skills"]>();
   const getSnapshot = SubscriptionRef.get(metadata).pipe(
     Effect.flatMap((state) => options.stampIdentity(state.draft)),
   );
@@ -281,7 +285,7 @@ export const makeAntigravityProvider = Effect.fn("makeAntigravityProvider")(func
                     cwd,
                     checkedAt: updatedAt,
                     slashCommands: workspace?.slashCommands ?? draft.slashCommands,
-                    skills: workspace?.skills ?? [],
+                    skills: workspace?.skills ?? discoveredSkills.get(cwd) ?? [],
                   },
                 ].slice(-MAX_WORKSPACE_SNAPSHOTS),
               }
@@ -308,7 +312,15 @@ export const makeAntigravityProvider = Effect.fn("makeAntigravityProvider")(func
             ? {
                 workspaceSnapshots: [
                   ...(state.draft.workspaceSnapshots ?? []).filter((entry) => entry.cwd !== cwd),
-                  { cwd, checkedAt: updatedAt, slashCommands, skills: [] },
+                  {
+                    cwd,
+                    checkedAt: updatedAt,
+                    slashCommands,
+                    skills:
+                      state.draft.workspaceSnapshots?.find((entry) => entry.cwd === cwd)?.skills ??
+                      discoveredSkills.get(cwd) ??
+                      [],
+                  },
                 ].slice(-MAX_WORKSPACE_SNAPSHOTS),
               }
             : {}),
@@ -338,18 +350,20 @@ export const makeAntigravityProvider = Effect.fn("makeAntigravityProvider")(func
           },
         }) satisfies AntigravityProviderState,
     );
+    discoveredSkills.clear();
   });
 
-  const snapshotForCwd = Effect.fn("AntigravityProvider.snapshotForCwd")(function* (cwd: string) {
+  const snapshotForCwd = Effect.fn("AntigravityProvider.snapshotForCwd")(function* (
+    cwd: string,
+    skills?: ServerProvider["skills"],
+  ) {
+    if (skills) discoveredSkills.set(cwd, skills);
     const snapshot = yield* getSnapshot;
     const workspace = snapshot.workspaceSnapshots?.find((entry) => entry.cwd === cwd);
+    const resolvedSkills = skills ?? workspace?.skills ?? discoveredSkills.get(cwd) ?? [];
     return workspace
-      ? {
-          ...snapshot,
-          slashCommands: workspace.slashCommands,
-          skills: workspace.skills,
-        }
-      : snapshot;
+      ? { ...snapshot, slashCommands: workspace.slashCommands, skills: resolvedSkills }
+      : { ...snapshot, skills: resolvedSkills };
   });
 
   return {

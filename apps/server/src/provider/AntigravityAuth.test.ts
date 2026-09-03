@@ -52,7 +52,11 @@ const phase = (auth: AntigravityAuth, value: ProviderAuthState["phase"], session
   );
 
 const makeHarness = Effect.fn("makeAuthTestHarness")(function* (
-  options: { readonly interactive?: boolean; readonly supportsLogout?: boolean } = {},
+  options: {
+    readonly interactive?: boolean;
+    readonly supportsLogout?: boolean;
+    readonly forwardCallback?: Effect.Effect<void, ProviderSetupError>;
+  } = {},
 ) {
   const authenticated = yield* Deferred.make<void, AcpErrors.AcpError>();
   const discovered = yield* Deferred.make<void>();
@@ -107,6 +111,7 @@ const makeHarness = Effect.fn("makeAuthTestHarness")(function* (
       events.push("catalog-cleared");
     }),
     forwardCallback: () =>
+      options.forwardCallback ??
       Effect.sync(() => {
         forwarded += 1;
       }),
@@ -208,6 +213,37 @@ it.layer(NodeServices.layer)("AntigravityAuth", (it) => {
       assert.equal(harness.forwarded(), 0);
       assert.equal((yield* phase(harness.auth, "waiting")).authorizationUrl, authorizationUrl);
       yield* harness.auth.controller.cancel(owner, state.flowId!);
+    }),
+  );
+
+  it.effect("fails the flow when delivery fails after the requesting client disconnects", () =>
+    Effect.gen(function* () {
+      const deliveryGate = yield* Deferred.make<void>();
+      const harness = yield* makeHarness({
+        forwardCallback: Deferred.await(deliveryGate).pipe(
+          Effect.andThen(
+            Effect.fail(
+              new ProviderSetupError({
+                instanceId,
+                operation: "complete",
+                detail: "loopback refused",
+              }),
+            ),
+          ),
+        ),
+      });
+      const state = yield* harness.auth.controller.start(owner);
+      yield* phase(harness.auth, "waiting");
+      // The client sends the callback, then its socket drops before Google answers.
+      const request = yield* harness.auth.controller
+        .complete(owner, { flowId: state.flowId!, callbackUrl })
+        .pipe(Effect.forkScoped);
+      yield* phase(harness.auth, "verifying");
+      yield* Fiber.interrupt(request);
+      yield* Deferred.succeed(deliveryGate, undefined);
+      const failed = yield* phase(harness.auth, "failed");
+      assert.include(failed.message ?? "", "Could not deliver");
+      assert.isTrue(harness.events.includes("process-close"));
     }),
   );
 

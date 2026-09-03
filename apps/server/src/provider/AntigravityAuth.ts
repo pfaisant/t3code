@@ -29,6 +29,7 @@ import {
 import type { ProviderAuthController } from "./Services/ProviderAuthService.ts";
 
 const AUTH_TIMEOUT_MS = 300_000;
+const FORWARDING_FAILED_MESSAGE = "Could not deliver the sign-in response. Start sign-in again.";
 const isSetupError = Schema.is(ProviderSetupError);
 const isAcpRequestError = Schema.is(AcpErrors.AcpRequestError);
 
@@ -399,19 +400,30 @@ export const makeAntigravityAuth = Effect.fn("makeAntigravityAuth")(function* <
             authorizationUrl: null,
             message: "Waiting for Google to finish sign-in.",
           });
+          // The instance owns delivery and its failure handling. The RPC that
+          // sent the callback may disconnect before Google answers, and the
+          // flow must still settle instead of sitting at "verifying" until
+          // the deadline.
           const forwarding = yield* (
             options.forwardCallback?.(callback) ??
             forwardAntigravityCallback(options.instanceId, callback)
-          ).pipe(Effect.interruptible, Effect.forkIn(instanceScope));
+          ).pipe(
+            // stopFlow interrupts this fiber, so it runs from a sibling fiber.
+            Effect.tapError(() =>
+              stopFlow(flow, "failed", FORWARDING_FAILED_MESSAGE).pipe(
+                Effect.forkIn(instanceScope),
+              ),
+            ),
+            Effect.interruptible,
+            Effect.forkIn(instanceScope),
+          );
           flow.forwarding = forwarding;
           return { flow, forwarding };
         }),
       );
       const forwarded = yield* Fiber.await(pending.forwarding);
       if (Exit.isFailure(forwarded)) {
-        const detail = "Could not deliver the sign-in response. Start sign-in again.";
-        yield* stopFlow(pending.flow, "failed", detail);
-        return yield* setupError("complete", detail);
+        return yield* setupError("complete", FORWARDING_FAILED_MESSAGE);
       }
       return pending.flow.state;
     }),

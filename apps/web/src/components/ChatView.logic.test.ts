@@ -796,6 +796,18 @@ describe("resolveComposerProviderSelection", () => {
     );
   });
 
+  it("blocks a saved model that a ready catalog no longer lists", () => {
+    const provider = entry("antigravity", "google_work", {
+      status: "ready",
+      models: catalogModels,
+    }).snapshot;
+
+    expect(getAntigravitySendBlockReason(provider, "saved-model-not-in-current-catalog")).toBe(
+      "That Antigravity model is no longer available. Choose another model.",
+    );
+    expect(getAntigravitySendBlockReason(provider, "gemini-pro")).toBeNull();
+  });
+
   it("allows a saved native model to retry after a provider error without changing it", () => {
     const provider = entry("antigravity", "google_work", {
       status: "error",

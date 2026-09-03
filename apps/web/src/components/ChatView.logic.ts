@@ -1,4 +1,5 @@
 import {
+  ANTIGRAVITY_DEFAULT_MODEL,
   type AssetCreateUrlInput,
   type AssetCreateUrlResult,
   type ChatFileAttachment,
@@ -397,7 +398,10 @@ export function resolveComposerInteractionMode(input: {
 }
 
 export function getAntigravitySendBlockReason(
-  provider: Pick<ServerProvider, "driver" | "installed" | "auth" | "models"> | null | undefined,
+  provider:
+    | Pick<ServerProvider, "driver" | "installed" | "auth" | "models" | "status">
+    | null
+    | undefined,
   model: string,
 ): string | null {
   if (provider?.driver !== "antigravity") return null;
@@ -410,7 +414,20 @@ export function getAntigravitySendBlockReason(
   if (provider.models.length === 0) {
     return "Refresh Antigravity models in provider settings before sending.";
   }
-  return model.trim().length === 0 ? "Choose an Antigravity model before sending." : null;
+  const slug = model.trim();
+  if (slug.length === 0) return "Choose an Antigravity model before sending.";
+  // A saved model that left the catalog is kept in the picker as unavailable
+  // so the user sees what the thread used. The server rejects it at turn
+  // start, so block here unless the provider is in an error state, where a
+  // retry with the same model is the right move.
+  if (
+    provider.status === "ready" &&
+    slug !== ANTIGRAVITY_DEFAULT_MODEL &&
+    !provider.models.some((entry) => entry.slug === slug || entry.aliases?.includes(slug))
+  ) {
+    return "That Antigravity model is no longer available. Choose another model.";
+  }
+  return null;
 }
 
 export function buildRevertTurnCountByUserMessageId(input: {

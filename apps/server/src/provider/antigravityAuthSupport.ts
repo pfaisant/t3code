@@ -28,6 +28,7 @@ const maxStdoutLineBytes = 16 * 1024 * 1024;
 const authPrefixBytes = new TextEncoder().encode(ANTIGRAVITY_AUTH_STDOUT_PREFIX);
 const decodeUrl = Schema.decodeUnknownEffect(Schema.URLFromString);
 const ProfileSettingsFile = Schema.Struct({
+  auth: Schema.Struct({ type: Schema.String }),
   gcp: Schema.optional(
     Schema.Struct({
       project: Schema.optional(Schema.String),
@@ -135,13 +136,21 @@ export function antigravityAuthConfigIssue(auth: AntigravityAuthConfig): string 
   }
 }
 
-/** `settings.json` content the agent reads for the GCP block. Never holds a credential. */
+/**
+ * `settings.json` content for the agent's profile. `auth.type` names the
+ * selected method so a native logout clears only that method's credentials
+ * instead of every stored token. The GCP block feeds Enterprise and Agent
+ * Platform. Never holds a credential.
+ */
 export function antigravityProfileSettings(auth: AntigravityAuthConfig): string {
   const gcp = {
     ...(auth.gcpProject ? { project: auth.gcpProject } : {}),
     ...(auth.gcpLocation ? { location: auth.gcpLocation } : {}),
   };
-  return `${encodeProfileSettings(Object.keys(gcp).length > 0 ? { gcp } : {})}\n`;
+  return `${encodeProfileSettings({
+    auth: { type: auth.authMethod },
+    ...(Object.keys(gcp).length > 0 ? { gcp } : {}),
+  })}\n`;
 }
 
 export interface AntigravityAuthorizationUrl {
@@ -302,9 +311,9 @@ export const prepareAntigravityProfile = Effect.fn("prepareAntigravityProfile")(
         );
     }
   }
-  // The agent reads and rewrites settings.json itself (it records auth.type
-  // there after a sign-in), so only the GCP block is owned here. Rewriting on
-  // every launch keeps a project or location edit in Settings effective.
+  // Rewriting on every launch keeps a method, project, or location edit in
+  // Settings effective. The agent also records auth.type here after a
+  // sign-in, which matches the value written below.
   yield* fs
     .writeFileString(path.join(acpDirectory, "settings.json"), antigravityProfileSettings(auth))
     .pipe(

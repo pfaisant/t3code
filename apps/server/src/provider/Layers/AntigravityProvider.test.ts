@@ -495,6 +495,32 @@ it.layer(testLayer)("Antigravity provider snapshots", (it) => {
     ),
   );
 
+  it.effect("keeps discovered workspace skills through session and command updates", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const harness = yield* makeHarness();
+        yield* harness.initialize;
+        const skills = [
+          {
+            name: "deploy",
+            description: "Ship it",
+            path: "/workspace/.agent/skills/deploy",
+            enabled: true,
+          },
+        ];
+        const discovered = yield* harness.provider.snapshotForCwd("/workspace", skills);
+        expect(discovered.skills).toEqual(skills);
+        yield* harness.provider.onSessionStarted(started, "/workspace");
+        yield* harness.provider.onAvailableCommands(commands, "/workspace");
+        const after = yield* harness.provider.snapshot.getSnapshot;
+        expect(
+          after.workspaceSnapshots?.find((entry) => entry.cwd === "/workspace")?.skills,
+        ).toEqual(skills);
+        expect((yield* harness.provider.snapshotForCwd("/workspace")).skills).toEqual(skills);
+      }),
+    ),
+  );
+
   it.effect("bounds workspace metadata without starting sessions for workspace lookup", () =>
     Effect.scoped(
       Effect.gen(function* () {

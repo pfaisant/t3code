@@ -142,7 +142,7 @@ describe("Antigravity process environment", () => {
     expect(business.GOOGLE_API_KEY).toBeUndefined();
   });
 
-  it("writes only the GCP block into the agent's settings.json", () => {
+  it("writes the auth method and GCP block into the agent's settings.json", () => {
     expect(
       decodeJson(
         antigravityProfileSettings({
@@ -152,8 +152,14 @@ describe("Antigravity process environment", () => {
           gcpLocation: "us-central1",
         }),
       ),
-    ).toEqual({ gcp: { project: "proj", location: "us-central1" } });
-    expect(decodeJson(antigravityProfileSettings(ANTIGRAVITY_PERSONAL_AUTH))).toEqual({});
+    ).toEqual({
+      auth: { type: "oauth-business" },
+      gcp: { project: "proj", location: "us-central1" },
+    });
+    // The agent's logout reads auth.type to clear only that method's token.
+    expect(decodeJson(antigravityProfileSettings(ANTIGRAVITY_PERSONAL_AUTH))).toEqual({
+      auth: { type: "oauth-personal" },
+    });
   });
 
   it("names the missing credential for each method", () => {
@@ -422,11 +428,16 @@ it.layer(NodeServices.layer)("Antigravity profile preparation", (it) => {
       });
       const settingsPath = path.join(profile.acpDirectory, "settings.json");
       const first = yield* fs.readFileString(settingsPath);
-      expect(decodeJson(first)).toEqual({ gcp: { project: "proj", location: "us-central1" } });
+      expect(decodeJson(first)).toEqual({
+        auth: { type: "agent-platform" },
+        gcp: { project: "proj", location: "us-central1" },
+      });
       expect(first).not.toContain("vertex-secret");
 
       yield* prepareAntigravityProfile({ profileDirectory: temporaryDirectory });
-      expect(decodeJson(yield* fs.readFileString(settingsPath))).toEqual({});
+      expect(decodeJson(yield* fs.readFileString(settingsPath))).toEqual({
+        auth: { type: "oauth-personal" },
+      });
     }),
   );
 
