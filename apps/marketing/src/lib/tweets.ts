@@ -60,14 +60,6 @@ export const tweets = [
     link: "https://x.com/aronprins/status/2089761738358915267",
   },
   {
-    handle: "QuinnyPig",
-    content:
-      "It’s worth pointing out that I had an agent take this from “idea” to “functional shitpost” entirely via t3code, from my phone.\n\n@Cloudflare for domain and DNS, @vercel for the app deployment.\n\nOn AWS it would still be in a struggleprovision loop.",
-    excerpt:
-      "...I had an agent take this from “idea” to “functional shitpost” entirely via t3code, from my phone.",
-    link: "https://x.com/QuinnyPig/status/2090285720296697862",
-  },
-  {
     handle: "teja2495",
     content:
       "I’ve completely switched to T3 Code for all my workflows. I just switch between different subscriptions and harnesses depending on what I need.",
