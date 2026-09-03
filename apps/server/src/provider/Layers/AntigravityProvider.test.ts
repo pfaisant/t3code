@@ -122,7 +122,7 @@ const makeHarness = Effect.fn("makeAntigravityProviderHarness")(function* (
   const provider = yield* makeAntigravityProvider(
     decodeSettings({ enabled: options.enabled ?? true, customModels: ["do-not-seed-me"] }),
     {
-      stampIdentity: (snapshot) => ({ ...snapshot, instanceId, driver }),
+      stampIdentity: (snapshot) => Effect.succeed({ ...snapshot, instanceId, driver }),
       probe: Ref.update(probeCalls, (count) => count + 1).pipe(
         Effect.andThen(Ref.get(probe)),
         Effect.flatten,

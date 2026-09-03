@@ -35,11 +35,13 @@ import {
   type AntigravityAcpRuntimeInput,
 } from "../acp/AntigravityAcpSupport.ts";
 import type { AcpSessionRuntime, AcpSessionRuntimeStartResult } from "../acp/AcpSessionRuntime.ts";
+import type { ServerProviderDraft } from "../providerSnapshot.ts";
 import { removeAntigravitySessionFiles } from "../acp/AntigravitySessionFiles.ts";
 import { ProviderDriverError } from "../Errors.ts";
 import { makeAntigravityAdapter } from "../Layers/AntigravityAdapter.ts";
 import { makeAntigravityProvider } from "../Layers/AntigravityProvider.ts";
 import { ProviderEventLoggers } from "../Layers/ProviderEventLoggers.ts";
+import * as ModelManifest from "../ModelManifest.ts";
 import {
   defaultProviderContinuationIdentity,
   type ProviderDriver,
@@ -58,6 +60,7 @@ export type AntigravityDriverEnv =
   | ChildProcessSpawner.ChildProcessSpawner
   | Crypto.Crypto
   | FileSystem.FileSystem
+  | ModelManifest.ModelManifest
   | Path.Path
   | ProviderEventLoggers
   | ServerConfig
@@ -78,6 +81,7 @@ export const AntigravityDriver: ProviderDriver<AntigravitySettings, AntigravityD
       const serverConfig = yield* ServerConfig;
       const installation = yield* AntigravityInstallation;
       const loggers = yield* ProviderEventLoggers;
+      const modelManifest = yield* ModelManifest.ModelManifest;
       const settings = { ...config, enabled } satisfies AntigravitySettings;
       const auth: AntigravityAuthConfig = {
         authMethod: settings.authMethod,
@@ -102,6 +106,15 @@ export const AntigravityDriver: ProviderDriver<AntigravitySettings, AntigravityD
         accentColor,
         continuationGroupKey: continuationIdentity.continuationKey,
       });
+      // Google returns every model the account can use, including older
+      // Gemini generations. The manifest names the current ones so the picker
+      // folds the rest under its legacy section, as it does for Codex.
+      const classifyModels = (draft: ServerProviderDraft) =>
+        modelManifest.current.pipe(
+          Effect.map((manifest) =>
+            stampIdentity(ModelManifest.applyModelManifest(draft, manifest, DRIVER)),
+          ),
+        );
 
       const makeRuntime = Effect.fn("AntigravityDriver.makeRuntime")(function* (
         input: Omit<AntigravityAcpRuntimeInput, "spawn" | "childProcessSpawner">,
@@ -254,7 +267,7 @@ export const AntigravityDriver: ProviderDriver<AntigravitySettings, AntigravityD
       }).pipe(Effect.scoped);
 
       const provider = yield* makeAntigravityProvider(settings, {
-        stampIdentity,
+        stampIdentity: classifyModels,
         probe,
         auth: { type: auth.authMethod, label: antigravityAuthLabel(auth.authMethod) },
         supportsTextGeneration: isAntigravityTextGenerationAvailable(profileDirectory).pipe(

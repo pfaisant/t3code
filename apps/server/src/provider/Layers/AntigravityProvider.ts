@@ -113,7 +113,7 @@ interface AntigravityProviderState {
 }
 
 interface AntigravityProviderOptions {
-  readonly stampIdentity: (snapshot: ServerProviderDraft) => ServerProvider;
+  readonly stampIdentity: (snapshot: ServerProviderDraft) => Effect.Effect<ServerProvider>;
   readonly probe: Effect.Effect<
     EffectAcpSchema.InitializeResponse,
     EffectAcpErrors.AcpError | ProviderSetupError
@@ -156,7 +156,7 @@ export const makeAntigravityProvider = Effect.fn("makeAntigravityProvider")(func
     authRevision: 0,
   });
   const getSnapshot = SubscriptionRef.get(metadata).pipe(
-    Effect.map((state) => options.stampIdentity(state.draft)),
+    Effect.flatMap((state) => options.stampIdentity(state.draft)),
   );
 
   const checkProvider = Effect.fn("checkAntigravityProvider")(function* () {
@@ -218,7 +218,7 @@ export const makeAntigravityProvider = Effect.fn("makeAntigravityProvider")(func
         },
       } satisfies AntigravityProviderState;
     });
-    return options.stampIdentity(next.draft);
+    return yield* options.stampIdentity(next.draft);
   });
 
   const managed = yield* makeManagedServerProvider({
@@ -235,7 +235,9 @@ export const makeAntigravityProvider = Effect.fn("makeAntigravityProvider")(func
     checkProvider: checkProvider(),
     enrichSnapshot: ({ publishSnapshot }) =>
       SubscriptionRef.changes(metadata).pipe(
-        Stream.runForEach((state) => publishSnapshot(options.stampIdentity(state.draft))),
+        Stream.runForEach((state) =>
+          options.stampIdentity(state.draft).pipe(Effect.flatMap(publishSnapshot)),
+        ),
       ),
   });
 
