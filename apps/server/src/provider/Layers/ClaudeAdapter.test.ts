@@ -2976,6 +2976,78 @@ describe("ClaudeAdapterLive", () => {
     );
   });
 
+  it.effect("drops back to the short deadline once the tool result arrives", () => {
+    const harness = makeHarness({
+      turnInactivityTimeoutMs: 1_000,
+      activeToolInactivityTimeoutMs: 5_000,
+    });
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const watch = yield* watchTurnCompletion(adapter);
+
+      yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+      yield* adapter.sendTurn({
+        threadId: THREAD_ID,
+        input: "run the tests",
+        attachments: [],
+      });
+      harness.query.emit({
+        type: "stream_event",
+        session_id: "sdk-session-1",
+        uuid: "stream-0",
+        parent_tool_use_id: null,
+        event: {
+          type: "content_block_start",
+          index: 0,
+          content_block: {
+            type: "tool_use",
+            id: "tool-1",
+            name: "Bash",
+            input: { command: "pnpm test" },
+          },
+        },
+      } as unknown as SDKMessage);
+      yield* settleFibers;
+      // The result clears the in-flight tool in the same message that wakes
+      // the watchdog, so the recomputed deadline must already be the short one.
+      harness.query.emit({
+        type: "user",
+        session_id: "sdk-session-1",
+        uuid: "user-tool-result",
+        parent_tool_use_id: null,
+        message: {
+          role: "user",
+          content: [{ type: "tool_result", tool_use_id: "tool-1", content: "ok" }],
+        },
+      } as unknown as SDKMessage);
+      yield* settleFibers;
+      assert.isTrue(watch.events.some((event) => event.type === "item.completed"));
+
+      yield* TestClock.adjust("999 millis");
+      yield* settleFibers;
+      assert.isFalse(watch.events.some((event) => event.type === "turn.completed"));
+
+      yield* TestClock.adjust("1 millis");
+      const completed = yield* Deferred.await(watch.turnCompleted).pipe(
+        Effect.timeout("2 seconds"),
+        TestClock.withLive,
+      );
+      yield* Fiber.interrupt(watch.fiber);
+      assert.equal(completed.payload.state, "failed");
+      assert.equal(
+        completed.payload.errorMessage,
+        "Claude produced no output for 1 second, so T3 Code stopped it. Send your message again to restart Claude with your current login.",
+      );
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
   it.effect("closes the previous session before replacing an existing thread session", () => {
     const queries: FakeClaudeQuery[] = [];
     const layer = Layer.effect(

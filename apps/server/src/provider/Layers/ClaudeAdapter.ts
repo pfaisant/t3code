@@ -3699,13 +3699,19 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
   ) {
     yield* logNativeSdkMessage(context, message);
     yield* ensureThreadId(context, message);
-    yield* recordTurnLiveness(context);
-
     // Wire-only command bookkeeping has no user-facing T3 lifecycle.
-    if (sdkMessageType(message) === "command_lifecycle") {
-      return;
+    if (sdkMessageType(message) !== "command_lifecycle") {
+      yield* dispatchSdkMessage(context, message);
     }
+    // After dispatch: a tool result or task exit that just emptied the
+    // in-flight sets must be visible when the watchdog recomputes its deadline.
+    yield* recordTurnLiveness(context);
+  });
 
+  const dispatchSdkMessage = Effect.fn("dispatchSdkMessage")(function* (
+    context: ClaudeSessionContext,
+    message: SDKMessage,
+  ) {
     switch (message.type) {
       case "stream_event":
         yield* handleStreamEvent(context, message);
@@ -4810,7 +4816,6 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         activeTurnId: turnId,
         updatedAt,
       };
-      yield* beginTurnLiveness(context);
 
       const turnStartedStamp = yield* makeEventStamp();
       yield* offerRuntimeEvent({
@@ -4854,6 +4859,12 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       type: "message",
       message,
     }).pipe(Effect.mapError((cause) => toRequestError(input.threadId, "turn/start", cause)));
+
+    // Armed only once the prompt is on its way to the CLI, so the deadline
+    // measures the CLI's silence and not our own skill scan or message build.
+    if (steeringTurnState === null) {
+      yield* beginTurnLiveness(context);
+    }
 
     return {
       threadId: context.session.threadId,
