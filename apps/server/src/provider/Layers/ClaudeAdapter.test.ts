@@ -24,6 +24,7 @@ import {
 import { createModelSelection } from "@t3tools/shared/model";
 import { assert, describe, it } from "@effect/vitest";
 import * as Context from "effect/Context";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
@@ -163,6 +164,8 @@ function makeHarness(config?: {
   readonly baseDir?: string;
   readonly claudeConfig?: Partial<ClaudeSettings>;
   readonly instanceId?: ProviderInstanceId;
+  readonly turnInactivityTimeoutMs?: number;
+  readonly activeToolInactivityTimeoutMs?: number;
 }) {
   const query = new FakeClaudeQuery();
   let createInput:
@@ -188,6 +191,12 @@ function makeHarness(config?: {
       ? {
           nativeEventLogPath: config.nativeEventLogPath,
         }
+      : {}),
+    ...(config?.turnInactivityTimeoutMs !== undefined
+      ? { turnInactivityTimeoutMs: config.turnInactivityTimeoutMs }
+      : {}),
+    ...(config?.activeToolInactivityTimeoutMs !== undefined
+      ? { activeToolInactivityTimeoutMs: config.activeToolInactivityTimeoutMs }
       : {}),
   };
 
@@ -298,6 +307,30 @@ async function readPromptMessages(
 
 const THREAD_ID = ThreadId.make("thread-claude-1");
 const RESUME_THREAD_ID = ThreadId.make("thread-claude-resume");
+
+/** Lets forked adapter fibers (SDK stream, turn watchdog) observe a change. */
+const settleFibers = Effect.gen(function* () {
+  for (let yieldAttempt = 0; yieldAttempt < 6; yieldAttempt += 1) {
+    yield* Effect.yieldNow;
+  }
+});
+
+const watchTurnCompletion = Effect.fn("watchTurnCompletion")(function* (
+  adapter: ClaudeAdapterShape,
+) {
+  const events: Array<ProviderRuntimeEvent> = [];
+  const turnCompleted =
+    yield* Deferred.make<Extract<ProviderRuntimeEvent, { type: "turn.completed" }>>();
+  const fiber = yield* Stream.runForEach(adapter.streamEvents, (event) =>
+    Effect.gen(function* () {
+      events.push(event);
+      if (event.type === "turn.completed") {
+        yield* Deferred.succeed(turnCompleted, event).pipe(Effect.ignore);
+      }
+    }),
+  ).pipe(Effect.forkChild);
+  return { events, turnCompleted, fiber };
+});
 const SYNTHETIC_SUBAGENT_MODEL = "claude-synthetic-subagent[expanded]";
 
 describe("ClaudeAdapterLive", () => {
@@ -2728,6 +2761,215 @@ describe("ClaudeAdapterLive", () => {
         assert.equal(completed.payload.state, "failed");
         assert.equal(completed.payload.errorMessage, "Claude runtime stream failed.");
       }
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("fails the turn when the Claude stream ends before a result", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const runtimeEvents: Array<ProviderRuntimeEvent> = [];
+      const turnCompleted =
+        yield* Deferred.make<Extract<ProviderRuntimeEvent, { type: "turn.completed" }>>();
+      const runtimeEventsFiber = yield* Stream.runForEach(adapter.streamEvents, (event) =>
+        Effect.gen(function* () {
+          runtimeEvents.push(event);
+          if (event.type === "turn.completed") {
+            yield* Deferred.succeed(turnCompleted, event).pipe(Effect.ignore);
+          }
+        }),
+      ).pipe(Effect.forkChild);
+
+      yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+      yield* adapter.sendTurn({
+        threadId: THREAD_ID,
+        input: "hello",
+        attachments: [],
+      });
+
+      // The CLI closes its stream on its own: no result, no error of its own.
+      harness.query.finish();
+
+      const completed = yield* Deferred.await(turnCompleted).pipe(
+        Effect.timeout("2 seconds"),
+        TestClock.withLive,
+      );
+      yield* settleFibers;
+      yield* Fiber.interrupt(runtimeEventsFiber);
+
+      assert.equal(completed.payload.state, "failed");
+      assert.equal(
+        completed.payload.errorMessage,
+        "Claude exited before finishing the turn. Send your message again to restart it.",
+      );
+      const runtimeError = runtimeEvents.find((event) => event.type === "runtime.error");
+      assert.equal(runtimeError?.type, "runtime.error");
+      assert.isTrue(runtimeEvents.some((event) => event.type === "session.exited"));
+      assert.equal(yield* adapter.hasSession(THREAD_ID), false);
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("settles a Claude turn that stays silent past the inactivity deadline", () => {
+    const harness = makeHarness({ turnInactivityTimeoutMs: 1_000 });
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const watch = yield* watchTurnCompletion(adapter);
+
+      yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+      yield* adapter.sendTurn({
+        threadId: THREAD_ID,
+        input: "hello",
+        attachments: [],
+      });
+      yield* settleFibers;
+
+      yield* TestClock.adjust("999 millis");
+      yield* settleFibers;
+      assert.isFalse(watch.events.some((event) => event.type === "turn.completed"));
+      assert.equal(yield* adapter.hasSession(THREAD_ID), true);
+
+      yield* TestClock.adjust("1 millis");
+      const completed = yield* Deferred.await(watch.turnCompleted).pipe(
+        Effect.timeout("2 seconds"),
+        TestClock.withLive,
+      );
+      yield* settleFibers;
+      yield* Fiber.interrupt(watch.fiber);
+
+      assert.equal(completed.payload.state, "failed");
+      assert.equal(
+        completed.payload.errorMessage,
+        "Claude produced no output for 1 second, so T3 Code stopped it. Send your message again to restart Claude with your current login.",
+      );
+      const runtimeError = watch.events.find((event) => event.type === "runtime.error");
+      assert.equal(runtimeError?.type, "runtime.error");
+      // The CLI is closed like any failed stream, so the next send boots a fresh one.
+      assert.isTrue(watch.events.some((event) => event.type === "session.exited"));
+      assert.equal(harness.query.closeCalls, 1);
+      assert.equal(yield* adapter.hasSession(THREAD_ID), false);
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("restarts the Claude inactivity deadline on every SDK message", () => {
+    const harness = makeHarness({ turnInactivityTimeoutMs: 1_000 });
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const watch = yield* watchTurnCompletion(adapter);
+
+      yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+      yield* adapter.sendTurn({
+        threadId: THREAD_ID,
+        input: "hello",
+        attachments: [],
+      });
+      yield* settleFibers;
+
+      yield* TestClock.adjust("900 millis");
+      harness.query.emit({
+        type: "stream_event",
+        session_id: "sdk-session-1",
+        uuid: "stream-0",
+        parent_tool_use_id: null,
+        event: {
+          type: "content_block_start",
+          index: 0,
+          content_block: { type: "text", text: "" },
+        },
+      } as unknown as SDKMessage);
+      yield* settleFibers;
+
+      yield* TestClock.adjust("900 millis");
+      yield* settleFibers;
+      assert.isFalse(watch.events.some((event) => event.type === "turn.completed"));
+
+      yield* TestClock.adjust("100 millis");
+      const completed = yield* Deferred.await(watch.turnCompleted).pipe(
+        Effect.timeout("2 seconds"),
+        TestClock.withLive,
+      );
+      yield* Fiber.interrupt(watch.fiber);
+      assert.equal(completed.payload.state, "failed");
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("gives a silent Claude turn the longer deadline while a tool runs in the CLI", () => {
+    const harness = makeHarness({
+      turnInactivityTimeoutMs: 1_000,
+      activeToolInactivityTimeoutMs: 5_000,
+    });
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const watch = yield* watchTurnCompletion(adapter);
+
+      yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+      yield* adapter.sendTurn({
+        threadId: THREAD_ID,
+        input: "run the tests",
+        attachments: [],
+      });
+      harness.query.emit({
+        type: "stream_event",
+        session_id: "sdk-session-1",
+        uuid: "stream-0",
+        parent_tool_use_id: null,
+        event: {
+          type: "content_block_start",
+          index: 0,
+          content_block: {
+            type: "tool_use",
+            id: "tool-1",
+            name: "Bash",
+            input: { command: "pnpm test" },
+          },
+        },
+      } as unknown as SDKMessage);
+      yield* settleFibers;
+      assert.isTrue(watch.events.some((event) => event.type === "item.started"));
+
+      yield* TestClock.adjust("4999 millis");
+      yield* settleFibers;
+      assert.isFalse(watch.events.some((event) => event.type === "turn.completed"));
+      assert.equal(yield* adapter.hasSession(THREAD_ID), true);
+
+      yield* TestClock.adjust("1 millis");
+      const completed = yield* Deferred.await(watch.turnCompleted).pipe(
+        Effect.timeout("2 seconds"),
+        TestClock.withLive,
+      );
+      yield* Fiber.interrupt(watch.fiber);
+      assert.equal(completed.payload.state, "failed");
+      assert.equal(
+        completed.payload.errorMessage,
+        "Claude produced no output for 5 seconds, so T3 Code stopped it. Send your message again to restart Claude with your current login.",
+      );
     }).pipe(
       Effect.provideService(Random.Random, makeDeterministicRandomService()),
       Effect.provide(harness.layer),

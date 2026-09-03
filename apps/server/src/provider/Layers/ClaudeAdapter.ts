@@ -62,9 +62,11 @@ import {
   formatClaudeResumeCompactionQuestion,
 } from "@t3tools/shared/claudeCompaction";
 import * as Cause from "effect/Cause";
+import * as Clock from "effect/Clock";
 import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as FileSystem from "effect/FileSystem";
@@ -108,6 +110,27 @@ const encodeUnknownJsonStringExit = Schema.encodeUnknownExit(Schema.fromJsonStri
 const decodeUnknownJsonStringExit = Schema.decodeUnknownExit(Schema.fromJsonString(Schema.Unknown));
 
 const PROVIDER = ProviderDriverKind.make("claudeAgent");
+
+// A turn with no SDK output is indistinguishable from one the CLI silently
+// abandoned (a login swapped underneath a running process, a wedged token
+// refresh). Same conservative deadlines as the Grok watchdog: the model
+// streams partial output continuously, so minutes of silence is not thinking;
+// tools and subagents run inside the CLI, so live tool work earns longer.
+const DEFAULT_CLAUDE_TURN_INACTIVITY_TIMEOUT_MS = 10 * 60 * 1_000;
+const DEFAULT_CLAUDE_ACTIVE_TOOL_INACTIVITY_TIMEOUT_MS = 30 * 60 * 1_000;
+const NANOS_PER_MILLI = 1_000_000n;
+
+/** The thread keeps this as its error, so it says what happened and what to do. */
+function claudeStalledTurnMessage(timeoutMs: number): string {
+  const minutes = Math.round(timeoutMs / 60_000);
+  const seconds = Math.max(1, Math.round(timeoutMs / 1_000));
+  const window =
+    minutes >= 1
+      ? `${minutes} minute${minutes === 1 ? "" : "s"}`
+      : `${seconds} second${seconds === 1 ? "" : "s"}`;
+  return `Claude produced no output for ${window}, so T3 Code stopped it. Send your message again to restart Claude with your current login.`;
+}
+
 type ClaudeTextStreamKind = Extract<RuntimeContentStreamKind, "assistant_text" | "reasoning_text">;
 type ClaudeToolResultStreamKind = Extract<
   RuntimeContentStreamKind,
@@ -316,6 +339,10 @@ interface ClaudeSessionContext {
   readonly workflowMemberFingerprints: Map<string, string>;
   /** Task ids that have started and not yet reached a terminal state. */
   readonly liveTaskIds: Set<string>;
+  /** Wakes the turn watchdog (see runTurnLivenessWatchdog); sliding so bursts coalesce. */
+  readonly livenessSignals: Queue.Queue<void>;
+  /** Monotonic time of the last SDK message for the active turn; undefined between turns. */
+  lastTurnActivityAtNanos: bigint | undefined;
   turnState: ClaudeTurnState | undefined;
   lastKnownContextWindow: number | undefined;
   lastKnownTokenUsage: ThreadTokenUsageSnapshot | undefined;
@@ -342,6 +369,10 @@ export interface ClaudeAdapterLiveOptions {
   readonly nativeEventLogPath?: string;
   readonly nativeEventLogger?: EventNdjsonLogger;
   readonly modelCatalog?: Effect.Effect<ClaudeModelCatalog>;
+  /** Override the turn liveness deadline in focused tests. */
+  readonly turnInactivityTimeoutMs?: number;
+  /** Override the longer deadline used while a tool or subagent runs inside the CLI. */
+  readonly activeToolInactivityTimeoutMs?: number;
 }
 
 function isUuid(value: string): boolean {
@@ -1760,6 +1791,20 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
 
   const sessions = new Map<ThreadId, ClaudeSessionContext>();
   const runtimeEventQueue = yield* Queue.unbounded<ProviderRuntimeEvent>();
+  const requestedTurnInactivityTimeoutMs = options?.turnInactivityTimeoutMs;
+  const turnInactivityTimeoutMs =
+    typeof requestedTurnInactivityTimeoutMs === "number" &&
+    Number.isFinite(requestedTurnInactivityTimeoutMs)
+      ? Math.max(1, Math.floor(requestedTurnInactivityTimeoutMs))
+      : DEFAULT_CLAUDE_TURN_INACTIVITY_TIMEOUT_MS;
+  const turnInactivityTimeoutNanos = BigInt(turnInactivityTimeoutMs) * NANOS_PER_MILLI;
+  const requestedActiveToolInactivityTimeoutMs = options?.activeToolInactivityTimeoutMs;
+  const activeToolInactivityTimeoutMs =
+    typeof requestedActiveToolInactivityTimeoutMs === "number" &&
+    Number.isFinite(requestedActiveToolInactivityTimeoutMs)
+      ? Math.max(1, Math.floor(requestedActiveToolInactivityTimeoutMs))
+      : DEFAULT_CLAUDE_ACTIVE_TOOL_INACTIVITY_TIMEOUT_MS;
+  const activeToolInactivityTimeoutNanos = BigInt(activeToolInactivityTimeoutMs) * NANOS_PER_MILLI;
 
   const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
   const randomUUIDv4 = crypto.randomUUIDv4.pipe(
@@ -2245,6 +2290,47 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     });
   });
 
+  const signalTurnLiveness = (context: ClaudeSessionContext) =>
+    Queue.offer(context.livenessSignals, undefined).pipe(Effect.asVoid);
+
+  /**
+   * Arms the watchdog for a real turn. Unlike Grok, the deadline starts at
+   * the prompt itself: a CLI whose login was swapped underneath it never
+   * emits a first message, and that silence is exactly the stall to catch.
+   */
+  const beginTurnLiveness = Effect.fn("beginTurnLiveness")(function* (
+    context: ClaudeSessionContext,
+  ) {
+    context.lastTurnActivityAtNanos = yield* Clock.monotonicTimeNanos;
+    yield* signalTurnLiveness(context);
+  });
+
+  /** Any SDK message proves the CLI is alive; so does a human answering a pause. */
+  const recordTurnLiveness = Effect.fn("recordTurnLiveness")(function* (
+    context: ClaudeSessionContext,
+  ) {
+    if (context.stopped || context.turnState === undefined) {
+      return;
+    }
+    context.lastTurnActivityAtNanos = yield* Clock.monotonicTimeNanos;
+    yield* signalTurnLiveness(context);
+  });
+
+  const clearTurnLiveness = (context: ClaudeSessionContext) => {
+    context.lastTurnActivityAtNanos = undefined;
+    return signalTurnLiveness(context);
+  };
+
+  // An approval or AskUserQuestion waits on a human for as long as it takes.
+  const hasLivenessPause = (context: ClaudeSessionContext) =>
+    context.pendingApprovals.size > 0 || context.pendingUserInputs.size > 0;
+
+  // A long test run or subagent is silence on the SDK stream, not a stall.
+  const livenessTimeoutFor = (context: ClaudeSessionContext) =>
+    context.inFlightTools.size > 0 || context.liveTaskIds.size > 0
+      ? { milliseconds: activeToolInactivityTimeoutMs, nanos: activeToolInactivityTimeoutNanos }
+      : { milliseconds: turnInactivityTimeoutMs, nanos: turnInactivityTimeoutNanos };
+
   const completeTurn = Effect.fn("completeTurn")(function* (
     context: ClaudeSessionContext,
     status: ProviderRuntimeTurnStatus,
@@ -2429,6 +2515,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
 
     const updatedAt = yield* nowIso;
     context.turnState = undefined;
+    yield* clearTurnLiveness(context);
     context.session = {
       ...context.session,
       status: "ready",
@@ -3612,6 +3699,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
   ) {
     yield* logNativeSdkMessage(context, message);
     yield* ensureThreadId(context, message);
+    yield* recordTurnLiveness(context);
 
     // Wire-only command bookkeeping has no user-facing T3 lifecycle.
     if (sdkMessageType(message) === "command_lifecycle") {
@@ -3712,7 +3800,13 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         yield* completeTurn(context, "failed", message);
       }
     } else if (context.turnState) {
-      yield* completeTurn(context, "interrupted", "Claude runtime stream ended.");
+      // The CLI ended its stream on its own mid-turn (our own stop sets
+      // `stopped` first and never reaches here). Settling that as a quiet
+      // "interrupted" left the thread reading Done with no answer.
+      const message =
+        "Claude exited before finishing the turn. Send your message again to restart it.";
+      yield* emitRuntimeError(context, message);
+      yield* completeTurn(context, "failed", message);
     }
 
     yield* stopSessionInternal(context, {
@@ -3793,6 +3887,9 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     }
 
     yield* Queue.shutdown(context.promptQueue);
+    // Ends the watchdog loop (its pending take fails); no fiber to interrupt,
+    // since a stall settles from inside that very fiber.
+    yield* Queue.shutdown(context.livenessSignals);
 
     const streamFiber = context.streamFiber;
     context.streamFiber = undefined;
@@ -3828,6 +3925,76 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       sessions.delete(context.session.threadId);
     }
   });
+
+  /**
+   * Settles a turn the CLI has gone silent on, the same way a failed stream
+   * settles: the turn fails with a message the thread keeps as its error, and
+   * the process is closed so the next send boots a fresh CLI. That fresh
+   * start is what picks up a login that changed while the old one was wedged.
+   */
+  const settleStalledTurn = Effect.fn("settleStalledTurn")(function* (
+    context: ClaudeSessionContext,
+    turnId: TurnId,
+  ) {
+    const turnState = context.turnState;
+    const lastActivityAtNanos = context.lastTurnActivityAtNanos;
+    if (
+      context.stopped ||
+      turnState === undefined ||
+      turnState.turnId !== turnId ||
+      lastActivityAtNanos === undefined ||
+      hasLivenessPause(context)
+    ) {
+      return;
+    }
+    const timeout = livenessTimeoutFor(context);
+    const nowNanos = yield* Clock.monotonicTimeNanos;
+    if (nowNanos - lastActivityAtNanos < timeout.nanos) {
+      return;
+    }
+    const message = claudeStalledTurnMessage(timeout.milliseconds);
+    yield* emitRuntimeError(context, message);
+    yield* completeTurn(context, "failed", message);
+    yield* stopSessionInternal(context, {
+      emitExitEvent: true,
+    });
+  });
+
+  // Synthetic turns (background agent output between prompts) never get a
+  // result and are closed by the next send, so silence there is normal.
+  const isWatchedTurn = (turnState: ClaudeTurnState | undefined): turnState is ClaudeTurnState =>
+    turnState !== undefined && turnState.synthetic !== true;
+
+  const runTurnLivenessWatchdog = Effect.fn("runTurnLivenessWatchdog")(
+    function* (context: ClaudeSessionContext) {
+      while (!context.stopped) {
+        const turnState = context.turnState;
+        const lastActivityAtNanos = context.lastTurnActivityAtNanos;
+        if (
+          !isWatchedTurn(turnState) ||
+          lastActivityAtNanos === undefined ||
+          hasLivenessPause(context)
+        ) {
+          yield* Queue.take(context.livenessSignals);
+          continue;
+        }
+        const nowNanos = yield* Clock.monotonicTimeNanos;
+        const remainingNanos = livenessTimeoutFor(context).nanos - (nowNanos - lastActivityAtNanos);
+        if (remainingNanos <= 0n) {
+          yield* settleStalledTurn(context, turnState.turnId);
+          continue;
+        }
+        const wakeReason = yield* Effect.raceFirst(
+          Effect.sleep(Duration.nanos(remainingNanos)).pipe(Effect.as("timeout" as const)),
+          Queue.take(context.livenessSignals).pipe(Effect.as("activity" as const)),
+        );
+        if (wakeReason === "timeout") {
+          yield* settleStalledTurn(context, turnState.turnId);
+        }
+      }
+    },
+    Effect.catch(() => Effect.void),
+  );
 
   const requireSession = (
     threadId: ThreadId,
@@ -4452,6 +4619,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         updatedAt: startedAt,
       };
 
+      const livenessSignals = yield* Queue.sliding<void>(1);
       const context: ClaudeSessionContext = {
         session,
         promptQueue,
@@ -4471,6 +4639,8 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         pendingTaskModels,
         workflowMemberFingerprints,
         liveTaskIds,
+        livenessSignals,
+        lastTurnActivityAtNanos: undefined,
         turnState: undefined,
         lastKnownContextWindow: initialContextWindow,
         lastKnownTokenUsage: undefined,
@@ -4549,6 +4719,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           context.streamFiber = undefined;
         }
       });
+      runFork(runTurnLivenessWatchdog(context));
 
       return {
         ...session,
@@ -4639,6 +4810,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         activeTurnId: turnId,
         updatedAt,
       };
+      yield* beginTurnLiveness(context);
 
       const turnStartedStamp = yield* makeEventStamp();
       yield* offerRuntimeEvent({
@@ -4733,6 +4905,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
 
       context.pendingApprovals.delete(requestId);
       yield* Deferred.succeed(pending.decision, decision);
+      yield* recordTurnLiveness(context);
     },
   );
 
@@ -4751,6 +4924,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
 
     context.pendingUserInputs.delete(requestId);
     yield* Deferred.succeed(pending.answers, answers);
+    yield* recordTurnLiveness(context);
   });
 
   const stopSession: ClaudeAdapterShape["stopSession"] = Effect.fn("stopSession")(
