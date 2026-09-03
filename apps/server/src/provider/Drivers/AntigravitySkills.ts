@@ -42,11 +42,14 @@ const readIfPresent = <A, R>(
   path: string,
 ) =>
   effect.pipe(
-    Effect.catchTag("PlatformError", (cause) =>
-      cause.reason._tag === "NotFound"
-        ? Effect.succeed(undefined)
-        : Effect.fail(new AntigravitySkillsProbeError({ reason: "filesystem-error", path, cause })),
-    ),
+    Effect.catchTags({
+      PlatformError: (cause) =>
+        cause.reason._tag === "NotFound"
+          ? Effect.succeed(undefined)
+          : Effect.fail(
+              new AntigravitySkillsProbeError({ reason: "filesystem-error", path, cause }),
+            ),
+    }),
   );
 
 function parseSkillFrontmatter(contents: string, fileName: string) {

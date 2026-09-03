@@ -1,4 +1,4 @@
-// @effect-diagnostics nodeBuiltinImport:off
+// @effect-diagnostics nodeBuiltinImport:off - node:http sends the one-shot loopback callback with no proxy, redirect handling, or response logging.
 import * as NodeHttp from "node:http";
 
 import { ProviderSetupError, type ProviderInstanceId } from "@t3tools/contracts";

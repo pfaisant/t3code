@@ -256,10 +256,9 @@ export const buildAntigravityPrompt = Effect.fn("buildAntigravityPrompt")(functi
     const info = yield* fileSystem
       .stat(attachmentPath)
       .pipe(
-        Effect.mapError((cause) =>
+        Effect.mapError(() =>
           EffectAcpErrors.AcpRequestError.invalidParams(
             `Could not read attachment '${attachment.name}'.`,
-            { cause: cause.message },
           ),
         ),
       );
