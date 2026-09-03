@@ -3831,13 +3831,21 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
 
   const stopSessionInternal = Effect.fn("stopSessionInternal")(function* (
     context: ClaudeSessionContext,
-    options?: { readonly emitExitEvent?: boolean },
+    options?: {
+      readonly emitExitEvent?: boolean;
+      /**
+       * Finish the teardown even if close() throws. A stalled CLI must not
+       * survive as a reusable session just because closing it failed; the
+       * failure is logged and the next send boots a fresh process.
+       */
+      readonly continueOnCloseFailure?: boolean;
+    },
   ) {
     if (context.stopped) return;
 
     // Schedule process termination before any cleanup that can wait on the
     // provider. The SDK closes stdin, then escalates from SIGTERM to SIGKILL.
-    yield* Effect.try({
+    const closeResult = yield* Effect.try({
       try: () => context.query.close(),
       catch: (cause) =>
         new ProviderAdapterProcessError({
@@ -3846,7 +3854,16 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           detail: "Failed to close Claude runtime query.",
           cause,
         }),
-    });
+    }).pipe(Effect.result);
+    if (closeResult._tag === "Failure") {
+      if (options?.continueOnCloseFailure !== true) {
+        return yield* closeResult.failure;
+      }
+      yield* Effect.logWarning("Failed to close Claude runtime query; tearing the session down.", {
+        threadId: context.session.threadId,
+        cause: closeResult.failure,
+      });
+    }
 
     context.stopped = true;
 
@@ -3970,14 +3987,15 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     const message = claudeStalledTurnMessage(timeout.milliseconds);
     yield* emitRuntimeError(context, message);
     yield* completeTurn(context, "failed", message);
-    // A close() that throws leaves the session in place, exactly as a failed
-    // interrupt does; the turn is already failed, and the watchdog must stay
-    // alive to guard the next turn on that CLI rather than die with the error.
+    // The turn is already failed; whatever happens to the process, the
+    // session must not stay reusable, and the watchdog must not die with
+    // the error while it still guards this context.
     yield* stopSessionInternal(context, {
       emitExitEvent: true,
+      continueOnCloseFailure: true,
     }).pipe(
       Effect.catchCause((cause) =>
-        Effect.logWarning("Failed to close the stalled Claude session.", {
+        Effect.logWarning("Failed to tear down the stalled Claude session.", {
           threadId: context.session.threadId,
           cause,
         }),
