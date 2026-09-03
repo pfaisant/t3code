@@ -120,6 +120,8 @@ interface AntigravityProviderOptions {
   >;
   readonly supportsTextGeneration: Effect.Effect<boolean>;
   readonly maintenanceCapabilities?: ProviderMaintenanceCapabilities;
+  /** Auth type and label published once a session authenticates. */
+  readonly auth?: { readonly type: string; readonly label: string };
 }
 
 /** Health uses initialize only. Session callbacks supply account-specific metadata. */
@@ -261,7 +263,11 @@ export const makeAntigravityProvider = Effect.fn("makeAntigravityProvider")(func
           installed: true,
           status: settings.enabled ? "ready" : "disabled",
           version: started.initializeResult.agentInfo?.version || draft.version,
-          auth: { status: "authenticated", type: "oauth-personal", label: "Google account" },
+          auth: {
+            status: "authenticated",
+            type: options.auth?.type ?? "oauth-personal",
+            label: options.auth?.label ?? "Google account",
+          },
           checkedAt: updatedAt,
           models: buildAntigravityModelsFromSession(started.sessionSetupResult),
           supportsTextGeneration,

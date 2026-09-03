@@ -1,5 +1,6 @@
 import {
   ANTIGRAVITY_DEFAULT_MODEL,
+  type AntigravityAuthMethod,
   PROVIDER_SEND_TURN_MAX_FILE_BYTES,
   PROVIDER_SEND_TURN_MAX_IMAGE_BYTES,
   type ProviderSendTurnInput,
@@ -36,9 +37,19 @@ export interface AntigravityAcpRuntimeInput extends Omit<
 > {
   readonly childProcessSpawner: ChildProcessSpawner.ChildProcessSpawner["Service"];
   readonly onAuthorizationUrl?: (url: string) => Effect.Effect<void, EffectAcpErrors.AcpError>;
+  /**
+   * Advertise `fs.readTextFile` and `fs.writeTextFile`. The agent then routes
+   * workspace reads and writes through T3, which turns each edit into a
+   * `session/request_permission` with the file content, instead of writing
+   * through its own tools. Chat sessions turn this on. Setup, probe, and text
+   * generation helpers leave it off so they never touch a workspace.
+   */
+  readonly clientFileSystem?: boolean;
+  /** ACP `authenticate` method id. Defaults to the personal Google account flow. */
+  readonly authMethod?: AntigravityAuthMethod;
 }
 
-/** Uses only Google's personal-account ACP flow. Normal launches reject browser login. */
+/** Normal launches reject browser login; only the auth flow supplies `onAuthorizationUrl`. */
 export const makeAntigravityAcpRuntime = Effect.fn("makeAntigravityAcpRuntime")(function* (
   input: AntigravityAcpRuntimeInput,
 ): Effect.fn.Return<
@@ -49,11 +60,14 @@ export const makeAntigravityAcpRuntime = Effect.fn("makeAntigravityAcpRuntime")(
   const context = yield* Layer.build(
     AcpSessionRuntime.layer({
       ...input,
-      authMethodId: "oauth-personal",
+      authMethodId: input.authMethod ?? "oauth-personal",
       resumeMethod: "resume",
       cancelBehavior: "wait-for-prompt",
       clientCapabilities: {
-        fs: { readTextFile: false, writeTextFile: false },
+        fs: {
+          readTextFile: input.clientFileSystem === true,
+          writeTextFile: input.clientFileSystem === true,
+        },
         terminal: false,
       },
       transformStdout: makeAntigravityStdoutTransform(
@@ -121,6 +135,21 @@ export const applyAntigravityAcpModelSelection = Effect.fn("applyAntigravityAcpM
 );
 
 const IMAGE_MIME_TYPES = new Set(["image/bmp", "image/jpeg", "image/png", "image/webp"]);
+// Formats the bundled SDK's Audio type accepts. Anything else is rejected up front.
+const AUDIO_MIME_TYPES = new Set([
+  "audio/aac",
+  "audio/flac",
+  "audio/mp3",
+  "audio/mpeg",
+  "audio/mp4",
+  "audio/m4a",
+  "audio/x-m4a",
+  "audio/ogg",
+  "audio/wav",
+  "audio/x-wav",
+  "audio/webm",
+]);
+export const ANTIGRAVITY_MAX_AUDIO_ATTACHMENT_BYTES = 20 * 1024 * 1024;
 const TEXT_MIME_TYPES = new Set([
   "application/json",
   "application/ld+json",
@@ -203,15 +232,16 @@ export const buildAntigravityPrompt = Effect.fn("buildAntigravityPrompt")(functi
   for (const attachment of input.attachments ?? []) {
     const mimeType = attachment.mimeType.toLowerCase().split(";", 1)[0] ?? "";
     const image = attachment.type === "image" && IMAGE_MIME_TYPES.has(mimeType);
+    const audio = attachment.type === "file" && AUDIO_MIME_TYPES.has(mimeType);
     const pdf = attachment.type === "file" && mimeType === "application/pdf";
     const textFile =
       attachment.type === "file" &&
       (mimeType.startsWith("text/") ||
         TEXT_MIME_TYPES.has(mimeType) ||
         TEXT_FILE_EXTENSIONS.has(path.extname(attachment.name).toLowerCase()));
-    if (!image && !pdf && !textFile) {
+    if (!image && !audio && !pdf && !textFile) {
       return yield* EffectAcpErrors.AcpRequestError.invalidParams(
-        `Antigravity does not support '${attachment.name}' (${attachment.mimeType}). Attach a BMP, JPEG, PNG, WebP, PDF, or text file.`,
+        `Antigravity does not support '${attachment.name}' (${attachment.mimeType}). Attach a BMP, JPEG, PNG, WebP, PDF, audio, or text file.`,
       );
     }
     const attachmentPath = resolveAttachmentPath({
@@ -236,13 +266,15 @@ export const buildAntigravityPrompt = Effect.fn("buildAntigravityPrompt")(functi
     const size = Number(info.size);
     const limit = image
       ? PROVIDER_SEND_TURN_MAX_IMAGE_BYTES
-      : pdf
-        ? PROVIDER_SEND_TURN_MAX_FILE_BYTES
-        : ANTIGRAVITY_MAX_TEXT_ATTACHMENT_BYTES;
+      : audio
+        ? ANTIGRAVITY_MAX_AUDIO_ATTACHMENT_BYTES
+        : pdf
+          ? PROVIDER_SEND_TURN_MAX_FILE_BYTES
+          : ANTIGRAVITY_MAX_TEXT_ATTACHMENT_BYTES;
     totalBytes += size;
     if (info.type !== "File" || size > limit || totalBytes > MAX_TOTAL_ATTACHMENT_BYTES) {
       return yield* EffectAcpErrors.AcpRequestError.invalidParams(
-        `Attachment '${attachment.name}' is too large. Antigravity accepts text files up to 1 MiB, images up to 10 MiB, and 50 MiB total attachments.`,
+        `Attachment '${attachment.name}' is too large. Antigravity accepts text files up to 1 MiB, images up to 10 MiB, audio up to 20 MiB, and 50 MiB total attachments.`,
       );
     }
     const uri = yield* path.toFileUrl(attachmentPath).pipe(
@@ -272,6 +304,8 @@ export const buildAntigravityPrompt = Effect.fn("buildAntigravityPrompt")(functi
     }
     if (image) {
       blocks.push({ type: "image", data: Buffer.from(bytes).toString("base64"), mimeType });
+    } else if (audio) {
+      blocks.push({ type: "audio", data: Buffer.from(bytes).toString("base64"), mimeType });
     } else {
       const decoded = yield* Effect.try({
         try: () => new TextDecoder("utf-8", { fatal: true }).decode(bytes),

@@ -3,11 +3,13 @@ import {
   squashAtomCommandFailure,
   type AtomCommandResult,
 } from "@t3tools/client-runtime/state/runtime";
-import type {
-  EnvironmentId,
-  ProviderAuthState,
-  ProviderInstanceId,
-  ServerProvider,
+import {
+  ANTIGRAVITY_AUTH_METHODS,
+  type AntigravityAuthMethod,
+  type EnvironmentId,
+  type ProviderAuthState,
+  type ProviderInstanceId,
+  type ServerProvider,
 } from "@t3tools/contracts";
 import { useRef, useState } from "react";
 
@@ -25,6 +27,7 @@ interface ProviderSetupSectionProps {
   readonly instanceId: ProviderInstanceId;
   readonly provider: ServerProvider | undefined;
   readonly binaryPath?: string | undefined;
+  readonly authMethod?: AntigravityAuthMethod | undefined;
   readonly enabled: boolean;
   readonly readOnly: boolean;
   readonly onEnable: () => void;
@@ -39,6 +42,28 @@ const AUTH_PHASE_LABELS: Record<ProviderAuthState["phase"], string> = {
   failed: "Google sign-in failed.",
   cancelled: "Google sign-in cancelled.",
 };
+
+/** API key methods skip the browser, so the phases read as a credential check. */
+const CREDENTIAL_PHASE_LABELS: Record<ProviderAuthState["phase"], string> = {
+  idle: "Connect with the credentials in the provider settings.",
+  starting: "Checking credentials.",
+  waiting: "Checking credentials.",
+  verifying: "Checking credentials and available models.",
+  succeeded: "Connected.",
+  failed: "Could not connect with the configured credentials.",
+  cancelled: "Connection cancelled.",
+};
+
+/** Read the configured method from the instance config. Unknown values fall back to personal. */
+export function readAntigravityAuthMethod(config: unknown): AntigravityAuthMethod {
+  const value =
+    config !== null && typeof config === "object" && "authMethod" in config
+      ? config.authMethod
+      : undefined;
+  return (
+    ANTIGRAVITY_AUTH_METHODS.find((method) => method.value === value)?.value ?? "oauth-personal"
+  );
+}
 
 /** Setup state belongs to the selected environment and is never saved in client settings. */
 export function ProviderSetupSection(props: ProviderSetupSectionProps) {
@@ -69,6 +94,7 @@ export function ProviderSetupSection(props: ProviderSetupSectionProps) {
           instanceId={props.instanceId}
           provider={props.provider}
           binaryPath={props.binaryPath}
+          authMethod={props.authMethod ?? "oauth-personal"}
           enabled={props.enabled}
         />
       )}
@@ -83,13 +109,20 @@ function ProviderSetupActions({
   provider,
   enabled,
   binaryPath,
+  authMethod,
 }: Pick<
   ProviderSetupSectionProps,
   "environmentId" | "environmentLabel" | "instanceId" | "enabled" | "binaryPath"
 > & {
   readonly provider: ServerProvider;
+  readonly authMethod: AntigravityAuthMethod;
 }) {
   const target = { environmentId, input: { instanceId } };
+  const usesBrowser = authMethod === "oauth-personal" || authMethod === "oauth-business";
+  const phaseLabels = usesBrowser ? AUTH_PHASE_LABELS : CREDENTIAL_PHASE_LABELS;
+  const methodLabel =
+    ANTIGRAVITY_AUTH_METHODS.find((method) => method.value === authMethod)?.label ??
+    "Google account";
   const authQuery = useEnvironmentQuery(serverEnvironment.providerAuthState(target));
   const installQuery = useEnvironmentQuery(serverEnvironment.providerInstallState(target));
   const auth = authQuery.data;
@@ -123,14 +156,16 @@ function ProviderSetupActions({
   const authenticated = provider.auth.status === "authenticated";
   const authStatusMessage =
     auth === null
-      ? "Reading Google sign-in status."
+      ? "Reading sign-in status."
       : authActive || auth.phase === "failed" || auth.phase === "cancelled"
-        ? (auth.message ?? AUTH_PHASE_LABELS[auth.phase])
+        ? (auth.message ?? phaseLabels[auth.phase])
         : authenticated
-          ? "Signed in with Google."
+          ? usesBrowser
+            ? "Signed in with Google."
+            : "Connected."
           : auth.phase === "idle" && auth.message
             ? auth.message
-            : AUTH_PHASE_LABELS.idle;
+            : phaseLabels.idle;
   const authorizationUrl = auth?.phase === "waiting" ? auth.authorizationUrl : null;
   const queryError = authQuery.error ?? installQuery.error;
   const actionsDisabled = pendingLabel !== null || queryError !== null;
@@ -196,7 +231,7 @@ function ProviderSetupActions({
 
   async function signOut() {
     const confirmed = await ensureLocalApi().dialogs.confirm(
-      `Sign out of Google for ${provider.displayName ?? "Antigravity"} on ${environmentLabel}? This stops its running threads. Thread history is kept.`,
+      `${usesBrowser ? "Sign out of Google" : "Disconnect"} for ${provider.displayName ?? "Antigravity"} on ${environmentLabel}? This stops its running threads. Thread history is kept.`,
     );
     if (confirmed) {
       await runCommand("Signing out", () => logoutAuth(target));
@@ -309,7 +344,7 @@ function ProviderSetupActions({
       </div>
 
       <div className="grid gap-2 border-t border-border/60 pt-3">
-        <p className="font-medium">Google account</p>
+        <p className="font-medium">{methodLabel}</p>
         <p role="status" className="text-muted-foreground [overflow-wrap:anywhere]">
           {authStatusMessage}
         </p>
@@ -398,9 +433,13 @@ function ProviderSetupActions({
               disabled={actionsDisabled || !installed || auth === null || installActive}
               onClick={() => void runCommand("Starting sign-in", () => startAuth(target))}
             >
-              {auth?.phase === "failed" || auth?.phase === "cancelled"
-                ? "Retry Google sign-in"
-                : "Sign in with Google"}
+              {usesBrowser
+                ? auth?.phase === "failed" || auth?.phase === "cancelled"
+                  ? "Retry Google sign-in"
+                  : "Sign in with Google"
+                : auth?.phase === "failed" || auth?.phase === "cancelled"
+                  ? "Retry connection"
+                  : "Connect"}
             </Button>
           ) : null}
           {!authActive && provider.setup?.canAuthenticate ? (
@@ -410,7 +449,7 @@ function ProviderSetupActions({
               disabled={actionsDisabled || auth === null}
               onClick={() => void signOut()}
             >
-              Sign out of Google
+              {usesBrowser ? "Sign out of Google" : "Disconnect"}
             </Button>
           ) : null}
         </div>

@@ -5,6 +5,7 @@ import * as EffectAcpSchema from "effect-acp/schema";
 import {
   extractAntigravityUserInputQuestion,
   isAntigravityOpenCommand,
+  antigravityApprovalOptions,
   isAntigravityUserInputRequest,
   makeAntigravityUserInputResponse,
   normalizeAntigravitySessionUpdate,
@@ -91,6 +92,40 @@ describe("Antigravity permissions and questions", () => {
       "stop-this-command",
     );
     expect(selectAntigravityPermissionOptionId(permissionRequest, "cancel")).toBeUndefined();
+  });
+
+  it("surfaces the agent's prompt injection warning on the remembered approval", () => {
+    const risky = {
+      ...permissionRequest,
+      options: [
+        {
+          optionId: "remember-this-command",
+          name: "Allow Always (risky)",
+          kind: "allow_always",
+          _meta: {
+            "agy.security.warning": {
+              severity: "high",
+              risk: "prompt_injection",
+              title: "Allowing always can be risky",
+              message: "Untrusted files could re-run this action without asking.",
+            },
+          },
+        },
+        { optionId: "run-this-time", name: "Allow", kind: "allow_once" },
+        { optionId: "stop-this-command", name: "Deny", kind: "reject_once" },
+      ],
+    } satisfies EffectAcpSchema.RequestPermissionRequest;
+    expect(antigravityApprovalOptions(risky)).toEqual([
+      { decision: "accept", label: "Allow once" },
+      {
+        decision: "acceptForSession",
+        label: "Allow for this thread",
+        warning: "Untrusted files could re-run this action without asking.",
+      },
+      { decision: "decline", label: "Deny" },
+      { decision: "cancel", label: "Cancel" },
+    ]);
+    expect(antigravityApprovalOptions(permissionRequest)[1]).not.toHaveProperty("warning");
   });
 
   it("does not replace unsupported remembered approval with a single approval", () => {

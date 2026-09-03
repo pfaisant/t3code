@@ -21,10 +21,14 @@ import {
 import { makeAntigravityAuth, type AntigravityAuth } from "../AntigravityAuth.ts";
 import { AntigravityInstallation } from "../AntigravityInstallation.ts";
 import {
+  antigravityAuthConfigIssue,
+  antigravityAuthLabel,
+  antigravityAuthUsesBrowser,
   buildAntigravityAcpSpawnInput,
   isAntigravitySignInRequiredError,
   prepareAntigravityProfile,
   resolveAntigravityProfileDirectory,
+  type AntigravityAuthConfig,
 } from "../antigravityAuthSupport.ts";
 import {
   makeAntigravityAcpRuntime,
@@ -75,6 +79,13 @@ export const AntigravityDriver: ProviderDriver<AntigravitySettings, AntigravityD
       const installation = yield* AntigravityInstallation;
       const loggers = yield* ProviderEventLoggers;
       const settings = { ...config, enabled } satisfies AntigravitySettings;
+      const auth: AntigravityAuthConfig = {
+        authMethod: settings.authMethod,
+        apiKey: settings.apiKey,
+        gcpProject: settings.gcpProject,
+        gcpLocation: settings.gcpLocation,
+      };
+      const authConfigIssue = antigravityAuthConfigIssue(auth);
       const processEnvironment = mergeProviderInstanceEnvironment(environment);
       const profileDirectory = resolveAntigravityProfileDirectory(
         serverConfig.stateDir,
@@ -99,6 +110,13 @@ export const AntigravityDriver: ProviderDriver<AntigravitySettings, AntigravityD
         AcpError | ProviderSetupError,
         Scope.Scope
       > {
+        if (authConfigIssue !== null) {
+          return yield* new ProviderSetupError({
+            instanceId,
+            operation: "configure",
+            detail: authConfigIssue,
+          });
+        }
         const executable = yield* installation
           .acquire(settings.binaryPath, processEnvironment)
           .pipe(
@@ -114,6 +132,7 @@ export const AntigravityDriver: ProviderDriver<AntigravitySettings, AntigravityD
         const profile = yield* prepareAntigravityProfile({
           profileDirectory,
           baseEnv: processEnvironment,
+          auth,
         }).pipe(
           Effect.provideService(FileSystem.FileSystem, fileSystem),
           Effect.provideService(Path.Path, path),
@@ -121,12 +140,14 @@ export const AntigravityDriver: ProviderDriver<AntigravitySettings, AntigravityD
         );
         const runtime = yield* makeAntigravityAcpRuntime({
           ...input,
+          authMethod: auth.authMethod,
           childProcessSpawner: spawner,
           spawn: buildAntigravityAcpSpawnInput({
             installation: executable,
             profile,
             cwd: input.cwd,
             baseEnv: processEnvironment,
+            auth,
           }),
         }).pipe(Effect.provideService(Crypto.Crypto, crypto));
         return {
@@ -135,12 +156,10 @@ export const AntigravityDriver: ProviderDriver<AntigravitySettings, AntigravityD
             runtime
               .start()
               .pipe(
-                Effect.tapError(
-                  (cause): Effect.Effect<void> =>
-                    input.onAuthorizationUrl === undefined &&
-                    isAntigravitySignInRequiredError(cause)
-                      ? provider.onAuthRequired
-                      : Effect.void,
+                Effect.tapError((cause): Effect.Effect<void> =>
+                  input.onAuthorizationUrl === undefined && isAntigravitySignInRequiredError(cause)
+                    ? provider.onAuthRequired
+                    : Effect.void,
                 ),
               ),
         };
@@ -208,17 +227,18 @@ export const AntigravityDriver: ProviderDriver<AntigravitySettings, AntigravityD
           yield* runtime.drainEvents;
         }).pipe(Effect.scoped);
 
-      const auth: AntigravityAuth = yield* makeAntigravityAuth({
+      const authFlow: AntigravityAuth = yield* makeAntigravityAuth({
         instanceId,
         makeRuntime: makeDisposableRuntime,
         onAuthenticated: publishCatalog,
         onSignedOut: Effect.suspend(() => provider.onSignedOut),
+        usesBrowser: antigravityAuthUsesBrowser(auth.authMethod),
       });
 
       const probe = Effect.gen(function* () {
         const processScope = yield* Scope.make();
         yield* Effect.addFinalizer((exit) => Scope.close(processScope, exit));
-        return yield* auth
+        return yield* authFlow
           .withProcess(
             Scope.close(processScope, Exit.void),
             Effect.gen(function* () {
@@ -236,6 +256,7 @@ export const AntigravityDriver: ProviderDriver<AntigravitySettings, AntigravityD
       const provider = yield* makeAntigravityProvider(settings, {
         stampIdentity,
         probe,
+        auth: { type: auth.authMethod, label: antigravityAuthLabel(auth.authMethod) },
         supportsTextGeneration: isAntigravityTextGenerationAvailable(profileDirectory).pipe(
           Effect.provideService(FileSystem.FileSystem, fileSystem),
           Effect.provideService(Path.Path, path),
@@ -255,7 +276,7 @@ export const AntigravityDriver: ProviderDriver<AntigravitySettings, AntigravityD
       const adapter = yield* makeAntigravityAdapter(settings, {
         instanceId,
         makeRuntime,
-        withProcess: auth.withProcess,
+        withProcess: authFlow.withProcess,
         onSessionStarted: provider.onSessionStarted,
         onAvailableCommands: provider.onAvailableCommands,
         onAuthRequired: provider.onAuthRequired,
@@ -263,7 +284,7 @@ export const AntigravityDriver: ProviderDriver<AntigravitySettings, AntigravityD
       });
       const textGeneration = yield* makeAntigravityTextGeneration({
         profileDirectory,
-        withProcess: auth.withProcess,
+        withProcess: authFlow.withProcess,
         makeRuntime: (cwd) =>
           makeRuntime({
             cwd,
@@ -276,7 +297,7 @@ export const AntigravityDriver: ProviderDriver<AntigravitySettings, AntigravityD
         function* () {
           const processScope = yield* Scope.make();
           yield* Effect.addFinalizer((exit) => Scope.close(processScope, exit));
-          yield* auth
+          yield* authFlow
             .withProcess(
               Scope.close(processScope, Exit.void),
               Effect.gen(function* () {
@@ -310,7 +331,9 @@ export const AntigravityDriver: ProviderDriver<AntigravitySettings, AntigravityD
                 instanceId,
                 detail: isAntigravitySignInRequiredError(cause)
                   ? "Sign in to Antigravity in provider settings before refreshing models."
-                  : "Could not refresh Antigravity models. The previous model list is unchanged.",
+                  : cause._tag === "ProviderSetupError" && cause.operation === "configure"
+                    ? cause.detail
+                    : "Could not refresh Antigravity models. The previous model list is unchanged.",
                 cause,
               }),
         ),
@@ -347,7 +370,7 @@ export const AntigravityDriver: ProviderDriver<AntigravitySettings, AntigravityD
               ),
         adapter,
         textGeneration,
-        auth: auth.controller,
+        auth: authFlow.controller,
         refreshModels,
       } satisfies ProviderInstance;
     }),

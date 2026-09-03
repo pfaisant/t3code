@@ -47,6 +47,8 @@ interface NativePrompt {
   readonly result: Deferred.Deferred<AcpSchema.PromptResponse, AcpErrors.AcpError>;
 }
 
+type Runtime = Effect.Success<ReturnType<AntigravityAdapterOptions["makeRuntime"]>>;
+
 const makeHarness = Effect.fn("makeAntigravityAdapterHarness")(function* (options?: {
   readonly enabled?: boolean;
   readonly holdCancel?: boolean;
@@ -70,6 +72,10 @@ const makeHarness = Effect.fn("makeAntigravityAdapterHarness")(function* (option
   let currentModel = nativeDefault;
   let promptIndex = 0;
   let active: NativePrompt | undefined;
+  const fileHandlers: {
+    read?: Parameters<Runtime["handleReadTextFile"]>[0];
+    write?: Parameters<Runtime["handleWriteTextFile"]>[0];
+  } = {};
   let permissionHandler:
     | ((
         request: AcpSchema.RequestPermissionRequest,
@@ -100,6 +106,14 @@ const makeHarness = Effect.fn("makeAntigravityAdapterHarness")(function* (option
     handleRequestPermission: (handler) =>
       Effect.sync(() => {
         permissionHandler = handler;
+      }),
+    handleReadTextFile: (handler) =>
+      Effect.sync(() => {
+        fileHandlers.read = handler;
+      }),
+    handleWriteTextFile: (handler) =>
+      Effect.sync(() => {
+        fileHandlers.write = handler;
       }),
     start: () =>
       Effect.gen(function* () {
@@ -239,6 +253,7 @@ const makeHarness = Effect.fn("makeAntigravityAdapterHarness")(function* (option
         : Effect.die("Missing native permission handler"),
     );
   return {
+    fileHandlers,
     adapter,
     calls,
     launches,
@@ -825,6 +840,54 @@ it.layer(layer)("AntigravityAdapter", (it) => {
       expect(h.controls.closed).toBe(1);
       expect(yield* h.adapter.hasSession(threadId)).toBe(false);
     }),
+  );
+
+  it.effect("serves client file reads and writes only inside the session roots", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const h = yield* makeHarness();
+      const { attachmentsDir } = yield* ServerConfig;
+      const cwd = yield* fs.makeTempDirectoryScoped({ prefix: "t3-agy-fs-" });
+      const outside = yield* fs.makeTempDirectoryScoped({ prefix: "t3-agy-outside-" });
+      yield* fs.writeFileString(path.join(cwd, "notes.txt"), "one\ntwo\nthree\n");
+      yield* h.adapter.startSession({ threadId, cwd, runtimeMode: "approval-required" });
+      expect(h.launches[0]?.clientFileSystem).toBe(true);
+      expect(h.launches[0]?.additionalDirectories).toEqual([attachmentsDir]);
+      const read = h.fileHandlers.read;
+      const write = h.fileHandlers.write;
+      if (!read || !write) return yield* Effect.die("File handlers were not registered.");
+
+      const full = yield* read({ sessionId: nativeSessionId, path: path.join(cwd, "notes.txt") });
+      expect(full.content).toBe("one\ntwo\nthree\n");
+      const window = yield* read({
+        sessionId: nativeSessionId,
+        path: path.join(cwd, "notes.txt"),
+        line: 2,
+        limit: 1,
+      });
+      expect(window.content).toBe("two");
+
+      yield* write({
+        sessionId: nativeSessionId,
+        path: path.join(cwd, "nested", "new.txt"),
+        content: "created",
+      });
+      expect(yield* fs.readFileString(path.join(cwd, "nested", "new.txt"))).toBe("created");
+
+      const escape = yield* write({
+        sessionId: nativeSessionId,
+        path: path.join(outside, "escape.txt"),
+        content: "nope",
+      }).pipe(Effect.flip);
+      expect(escape._tag).toBe("AcpRequestError");
+      expect(yield* fs.exists(path.join(outside, "escape.txt"))).toBe(false);
+      const missing = yield* read({
+        sessionId: nativeSessionId,
+        path: path.join(cwd, "missing.txt"),
+      }).pipe(Effect.flip);
+      expect(missing._tag).toBe("AcpRequestError");
+    }).pipe(Effect.scoped),
   );
 
   it.effect("does not launch a process for a disabled instance or invalid resume cursor", () =>

@@ -414,12 +414,18 @@ const program = Effect.gen(function* () {
     }),
   );
 
+  // Mirrors the real agent: the API key method reads GEMINI_API_KEY from the
+  // process environment and rejects when it is missing.
   yield* agent.handleAuthenticate((request) =>
-    antigravityProfile && request.methodId !== "oauth-personal"
-      ? Effect.fail(
-          AcpError.AcpRequestError.invalidParams("Mock Antigravity requires oauth-personal."),
-        )
-      : Effect.succeed({}),
+    !antigravityProfile || request.methodId === "oauth-personal"
+      ? Effect.succeed({})
+      : request.methodId === "gemini-api-key" && process.env.GEMINI_API_KEY
+        ? Effect.succeed({})
+        : Effect.fail(
+            AcpError.AcpRequestError.invalidParams(
+              `Mock Antigravity rejected auth method ${request.methodId}.`,
+            ),
+          ),
   );
   if (antigravityProfile) {
     yield* agent.handleLogout(() => Effect.succeed({}));

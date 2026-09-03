@@ -69,7 +69,7 @@ import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { stackedThreadToast, toastManager } from "../ui/toast";
 import { AddProviderInstanceDialog } from "./AddProviderInstanceDialog";
 import { ProviderInstanceCard } from "./ProviderInstanceCard";
-import { ProviderSetupSection } from "./ProviderSetupSection";
+import { ProviderSetupSection, readAntigravityAuthMethod } from "./ProviderSetupSection";
 import { DRIVER_OPTIONS, getDriverOption } from "./providerDriverMeta";
 import { providerSettingsTabClassName } from "./providerSettingsTabs";
 import { searchableSetting } from "./settingsSearch";
@@ -857,6 +857,7 @@ export function EnvironmentProviderSettings({
               instanceId={row.instanceId}
               provider={liveProvider}
               binaryPath={configuredBinaryPath(row.instance.config)}
+              authMethod={readAntigravityAuthMethod(row.instance.config)}
               enabled={resolveProviderInstanceEnabled(row.instance)}
               readOnly={readOnly}
               onEnable={() => updateProviderInstance(row, { ...row.instance, enabled: true })}

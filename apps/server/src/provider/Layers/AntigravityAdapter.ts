@@ -93,6 +93,8 @@ type Adapter = ProviderAdapterShape<ProviderAdapterError>;
 type Runtime = Pick<
   AcpSessionRuntime.AcpSessionRuntime["Service"],
   | "handleRequestPermission"
+  | "handleReadTextFile"
+  | "handleWriteTextFile"
   | "start"
   | "setMode"
   | "setModel"
@@ -183,6 +185,94 @@ interface SessionContext {
   closed: boolean;
   disconnected: boolean;
 }
+
+const CLIENT_FILE_MAX_BYTES = 8 * 1024 * 1024;
+
+function isInsideRoot(path: Path.Path, root: string, candidate: string): boolean {
+  const relative = path.relative(root, candidate);
+  return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
+}
+
+/** Resolves an agent-supplied path and rejects anything outside the session roots. */
+const resolveClientFilePath = Effect.fn("AntigravityAdapter.resolveClientFilePath")(
+  function* (input: {
+    readonly fileSystem: FileSystem.FileSystem;
+    readonly path: Path.Path;
+    readonly allowedRoots: ReadonlyArray<string>;
+    readonly requestPath: string;
+  }) {
+    const { path } = input;
+    const resolved = path.resolve(input.requestPath);
+    // Follow symlinks on the parent so a link out of the workspace cannot escape it.
+    const parent = yield* input.fileSystem
+      .realPath(path.dirname(resolved))
+      .pipe(Effect.orElseSucceed(() => path.dirname(resolved)));
+    const real = path.join(parent, path.basename(resolved));
+    const roots = yield* Effect.forEach(input.allowedRoots, (root) =>
+      input.fileSystem.realPath(root).pipe(Effect.orElseSucceed(() => root)),
+    );
+    if (!roots.some((root) => isInsideRoot(path, root, real))) {
+      return yield* EffectAcpErrors.AcpRequestError.invalidParams(
+        `Path '${input.requestPath}' is outside the session workspace.`,
+      );
+    }
+    return real;
+  },
+);
+
+const readClientTextFile = Effect.fn("AntigravityAdapter.readClientTextFile")(function* (input: {
+  readonly fileSystem: FileSystem.FileSystem;
+  readonly path: Path.Path;
+  readonly allowedRoots: ReadonlyArray<string>;
+  readonly request: EffectAcpSchema.ReadTextFileRequest;
+}): Effect.fn.Return<EffectAcpSchema.ReadTextFileResponse, EffectAcpErrors.AcpError> {
+  const filePath = yield* resolveClientFilePath({ ...input, requestPath: input.request.path });
+  const info = yield* input.fileSystem
+    .stat(filePath)
+    .pipe(
+      Effect.mapError(() =>
+        EffectAcpErrors.AcpRequestError.resourceNotFound(`File '${input.request.path}' not found.`),
+      ),
+    );
+  if (info.type !== "File" || Number(info.size) > CLIENT_FILE_MAX_BYTES) {
+    return yield* EffectAcpErrors.AcpRequestError.invalidParams(
+      `File '${input.request.path}' is not a readable text file under ${CLIENT_FILE_MAX_BYTES} bytes.`,
+    );
+  }
+  const text = yield* input.fileSystem
+    .readFileString(filePath)
+    .pipe(
+      Effect.mapError(() =>
+        EffectAcpErrors.AcpRequestError.internalError(`Could not read '${input.request.path}'.`),
+      ),
+    );
+  const line = input.request.line ?? undefined;
+  const limit = input.request.limit ?? undefined;
+  if (line === undefined && limit === undefined) {
+    return { content: text };
+  }
+  // ACP lines are 1-indexed. `limit` is a line count.
+  const lines = text.split("\n");
+  const start = Math.max(0, (line ?? 1) - 1);
+  const end = limit === undefined ? lines.length : Math.min(lines.length, start + limit);
+  return { content: lines.slice(start, end).join("\n") };
+});
+
+const writeClientTextFile = Effect.fn("AntigravityAdapter.writeClientTextFile")(function* (input: {
+  readonly fileSystem: FileSystem.FileSystem;
+  readonly path: Path.Path;
+  readonly allowedRoots: ReadonlyArray<string>;
+  readonly request: EffectAcpSchema.WriteTextFileRequest;
+}): Effect.fn.Return<EffectAcpSchema.WriteTextFileResponse, EffectAcpErrors.AcpError> {
+  const filePath = yield* resolveClientFilePath({ ...input, requestPath: input.request.path });
+  yield* input.fileSystem.makeDirectory(input.path.dirname(filePath), { recursive: true }).pipe(
+    Effect.andThen(input.fileSystem.writeFileString(filePath, input.request.content)),
+    Effect.mapError(() =>
+      EffectAcpErrors.AcpRequestError.internalError(`Could not write '${input.request.path}'.`),
+    ),
+  );
+  return {};
+});
 
 /** Keeps one official ACP process per thread and drains a cancelled prompt before steering. */
 export const makeAntigravityAdapter = Effect.fn("makeAntigravityAdapter")(function* (
@@ -561,9 +651,14 @@ export const makeAntigravityAdapter = Effect.fn("makeAntigravityAdapter")(functi
             stopOwned,
             Effect.gen(function* () {
               const mcp = McpProviderSession.readMcpProviderSession(input.threadId);
+              // The attachments dir grant lets the agent read pasted files at
+              // the paths ProviderService injects into the turn text. It is a
+              // leaf directory holding only uploads.
               const runtime = yield* options.makeRuntime({
                 cwd,
                 clientInfo: { name: "t3-code", version: "0.0.0" },
+                clientFileSystem: true,
+                additionalDirectories: [serverConfig.attachmentsDir],
                 ...(Option.isSome(cursor) ? { resumeSessionId: cursor.value.sessionId } : {}),
                 mcpServers: mcp
                   ? [
@@ -581,6 +676,17 @@ export const makeAntigravityAdapter = Effect.fn("makeAntigravityAdapter")(functi
                   threadId: input.threadId,
                 }),
               });
+              // Workspace file access requested through the client fs
+              // capability. The agent gates each write behind
+              // `session/request_permission`, so only path containment is
+              // checked here.
+              const allowedRoots = [cwd, serverConfig.attachmentsDir];
+              yield* runtime.handleReadTextFile((request) =>
+                readClientTextFile({ fileSystem, path, allowedRoots, request }),
+              );
+              yield* runtime.handleWriteTextFile((request) =>
+                writeClientTextFile({ fileSystem, path, allowedRoots, request }),
+              );
               yield* runtime.handleRequestPermission((request) =>
                 context
                   ? handlePermission(context, request).pipe(

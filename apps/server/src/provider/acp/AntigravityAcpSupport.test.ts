@@ -255,6 +255,30 @@ it.layer(NodeServices.layer)("buildAntigravityPrompt", (it) => {
     }),
   );
 
+  it.effect("sends supported audio files as native audio content", () =>
+    Effect.gen(function* () {
+      const fixture = yield* makeAttachmentFixture();
+      const audioAttachment = {
+        ...textAttachment,
+        id: "recording-1",
+        name: "recording.wav",
+        mimeType: "audio/wav",
+      } satisfies ChatAttachment;
+      const bytes = Buffer.from("RIFF....WAVEfmt ", "latin1");
+      yield* fixture.write(audioAttachment, bytes);
+      const prompt = yield* buildAntigravityPrompt({
+        input: "Transcribe this.",
+        attachments: [audioAttachment],
+        attachmentsDir: fixture.attachmentsDir,
+      });
+
+      expect(prompt).toEqual([
+        { type: "text", text: "Transcribe this." },
+        { type: "audio", data: bytes.toString("base64"), mimeType: "audio/wav" },
+      ]);
+    }),
+  );
+
   it.effect("uses a PDF file resource link without copying or reading its bytes", () =>
     Effect.gen(function* () {
       const fixture = yield* makeAttachmentFixture();
@@ -286,7 +310,7 @@ it.layer(NodeServices.layer)("buildAntigravityPrompt", (it) => {
   it.effect.each([
     { ...imageAttachment, name: "animation.gif", mimeType: "image/gif" },
     { ...textAttachment, name: "archive.zip", mimeType: "application/zip" },
-    { ...textAttachment, type: "audio", name: "recording.wav", mimeType: "audio/wav" },
+    { ...textAttachment, name: "recording.aiff", mimeType: "audio/aiff" },
   ] satisfies ReadonlyArray<ChatAttachment>)(
     "rejects $name instead of silently dropping it from a valid prompt",
     (attachment) =>

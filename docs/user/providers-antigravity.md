@@ -1,8 +1,9 @@
 # Antigravity
 
-T3 Code runs Google's official Antigravity ACP agent with personal Google sign-in. It uses your
-account's Antigravity access, including access provided by a Google AI subscription. It does not
-use a Gemini API key or fall back to API billing.
+T3 Code runs Google's official Antigravity ACP agent. By default it signs in with your personal
+Google account and uses that account's Antigravity access, including access provided by a
+Google AI subscription. It never falls back to a different sign-in method than the one you
+select.
 
 The agent, files, conversation state, and Google credentials stay on the selected environment.
 Your browser or phone controls that environment. Signing in to the Antigravity IDE or CLI does
@@ -45,6 +46,27 @@ the expiry time. If it expires, choose **Retry Google sign-in** and use the new 
 The return URL contains a temporary sign-in code. Paste it only into the setup field, not into
 a thread or bug report. T3 Code waits for Google's agent to confirm sign-in. A successful
 callback page alone does not prove account access.
+
+### Other sign-in methods
+
+**Sign-in method** in the Antigravity provider settings on web or desktop selects how the
+agent authenticates. Mobile shows the selected method and its connect controls.
+
+| Method                     | What you enter                           | How it signs in                 |
+| -------------------------- | ---------------------------------------- | ------------------------------- |
+| Google account             | Nothing                                  | Google sign-in page             |
+| Gemini Enterprise          | GCP project and GCP location             | Google sign-in page             |
+| Gemini API key             | API key                                  | Choose **Connect**. No browser. |
+| Agent Platform (Vertex AI) | API key, or GCP project and GCP location | Choose **Connect**. No browser. |
+
+Gemini Enterprise resolves your license for the project and location you enter. Agent Platform
+with a project and location uses Application Default Credentials on the environment. API keys
+are stored in plain text in T3 Code settings on that environment and are passed only to the
+Antigravity agent process. Ambient `GEMINI_API_KEY` or `GOOGLE_*` variables on the environment
+are ignored.
+
+Changing the method stops the instance's sessions. Sign out or disconnect before you switch
+accounts.
 
 ## Runtime installation
 
@@ -91,6 +113,15 @@ T3 Code asks you to select an available model instead of silently changing it.
 
 Use Antigravity's native `/plan` command to request a plan. T3 Code's separate Plan mode control
 is not available for this provider.
+
+Antigravity reads and edits workspace files through T3 Code. Each write shows up as a file
+change approval with the content, so **Supervised** and **Auto-accept edits** behave the same way
+they do for other providers. Attach images, PDFs, text files, or audio clips to a message and
+the agent receives them directly.
+
+When the agent offers **Allow for this thread** on a shell or web tool, T3 Code shows Google's
+prompt injection warning next to that choice. Untrusted content could re-run the same action
+without asking again.
 
 Antigravity can ask you to choose from a fixed set of answers. Select one of the offered
 choices. These questions do not accept custom text and still appear in **Full access** mode.

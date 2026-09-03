@@ -80,6 +80,8 @@ export interface AntigravityAuthOptions<
   ) => Effect.Effect<void>;
   readonly onSignedOut: Effect.Effect<void>;
   readonly forwardCallback?: (callback: URL) => Effect.Effect<void, ProviderSetupError>;
+  /** False for API key methods, which authenticate without a Google sign-in page. */
+  readonly usesBrowser?: boolean;
 }
 
 function visibleSnapshot(snapshot: AuthSnapshot, ownerSessionId: string): ProviderAuthState {
@@ -96,7 +98,7 @@ function visibleSnapshot(snapshot: AuthSnapshot, ownerSessionId: string): Provid
   };
 }
 
-function safeAuthFailure(cause: Cause.Cause<unknown>): string {
+function safeAuthFailure(cause: Cause.Cause<unknown>, usesBrowser: boolean): string {
   const error = Cause.findErrorOption(cause);
   if (Option.isSome(error)) {
     if (isSetupError(error.value)) {
@@ -109,9 +111,14 @@ function safeAuthFailure(cause: Cause.Cause<unknown>): string {
       if (/access_denied|denied access|cancelled/i.test(error.value.errorMessage)) {
         return "Google sign-in was not approved. Start sign-in again.";
       }
+      if (!usesBrowser && error.value.code === -32602) {
+        return "Antigravity rejected the configured credentials. Check the provider settings.";
+      }
     }
   }
-  return "Google sign-in failed. Start sign-in again.";
+  return usesBrowser
+    ? "Google sign-in failed. Start sign-in again."
+    : "Antigravity could not authenticate with the configured credentials.";
 }
 
 /** Owns one instance's explicit sign-in and all process admission around sign-out. */
@@ -122,6 +129,7 @@ export const makeAntigravityAuth = Effect.fn("makeAntigravityAuth")(function* <
 ): Effect.fn.Return<AntigravityAuth, never, Crypto.Crypto | Scope.Scope> {
   const crypto = yield* Crypto.Crypto;
   const instanceScope = yield* Scope.Scope;
+  const usesBrowser = options.usesBrowser ?? true;
   const lock = yield* Semaphore.make(1);
   const closed = yield* Deferred.make<void>();
   const emptyState: ProviderAuthState = {
@@ -215,8 +223,10 @@ export const makeAntigravityAuth = Effect.fn("makeAntigravityAuth")(function* <
           authorizationUrl: null,
           expiresAt: null,
           message: Exit.isSuccess(result)
-            ? "Signed in with Google."
-            : safeAuthFailure(result.cause),
+            ? usesBrowser
+              ? "Signed in with Google."
+              : "Connected to Antigravity."
+            : safeAuthFailure(result.cause, usesBrowser),
         });
       }),
     );
@@ -342,7 +352,7 @@ export const makeAntigravityAuth = Effect.fn("makeAntigravityAuth")(function* <
               phase: "starting",
               flowId,
               expiresAt: DateTime.formatIso(DateTime.makeUnsafe(expiresAtMillis)),
-              message: "Starting Google sign-in.",
+              message: usesBrowser ? "Starting Google sign-in." : "Checking credentials.",
             };
             const flow: AuthFlow = {
               id: flowId,

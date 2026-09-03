@@ -87,8 +87,14 @@ export function getProviderSummary(provider: ServerProvider | undefined) {
  */
 export function getProviderVersionLabel(version: string | null | undefined) {
   if (!version) return null;
-  // Only bare semver-like versions get a `v` prefix. Release tags such as
-  // Antigravity's `agy_acp_server_20260818_01_RC01` are shown as-is.
+  // Antigravity reports a release tag such as `agy_acp_server_20260818_01_RC01`.
+  // Show the date and candidate so the row title keeps room for the name.
+  const antigravity = /^agy_acp_server_(\d{4})(\d{2})(\d{2})_\d+(?:_(\w+))?$/.exec(version);
+  if (antigravity) {
+    const [, year, month, day, candidate] = antigravity;
+    return `${year}-${month}-${day}${candidate ? ` ${candidate}` : ""}`;
+  }
+  // Only bare semver-like versions get a `v` prefix. Other tags are shown as-is.
   return /^\d/.test(version) ? `v${version}` : version;
 }
 

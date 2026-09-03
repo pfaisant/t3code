@@ -1,6 +1,10 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { expect, it } from "@effect/vitest";
-import { ANTIGRAVITY_DEFAULT_MODEL, ProviderInstanceId } from "@t3tools/contracts";
+import {
+  ANTIGRAVITY_DEFAULT_MODEL,
+  ProviderInstanceId,
+  type AntigravitySettings,
+} from "@t3tools/contracts";
 import {
   HostProcessEnvironment,
   HostProcessExecutablePath,
@@ -49,7 +53,9 @@ function shellQuote(value: string): string {
   return `'${value.replaceAll("'", `'"'"'`)}'`;
 }
 
-const makeHarness = Effect.fn("makeAntigravityDriverHarness")(function* () {
+const makeHarness = Effect.fn("makeAntigravityDriverHarness")(function* (
+  options: { readonly config?: Partial<AntigravitySettings> } = {},
+) {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const config = yield* ServerConfig;
@@ -113,6 +119,7 @@ const makeHarness = Effect.fn("makeAntigravityDriverHarness")(function* () {
     harnessPath: string | undefined;
     forceFileStorage: string | undefined;
     credentialKeys: ReadonlyArray<string>;
+    geminiApiKey: string | undefined;
     handle: ChildProcessSpawner.ChildProcessHandle;
   }> = [];
 
@@ -153,6 +160,7 @@ const makeHarness = Effect.fn("makeAntigravityDriverHarness")(function* () {
         credentialKeys: Object.keys(environment).filter((key) =>
           blockedCredentialKeys.has(key.toUpperCase()),
         ),
+        geminiApiKey: environment.GEMINI_API_KEY,
         handle,
       });
       return handle;
@@ -162,7 +170,7 @@ const makeHarness = Effect.fn("makeAntigravityDriverHarness")(function* () {
     instanceId,
     displayName: "Google test account",
     enabled: false,
-    config: AntigravityDriver.defaultConfig(),
+    config: { ...AntigravityDriver.defaultConfig(), ...options.config },
     environment: [
       { name: "PATH", value: instancePath },
       { name: "T3_ACP_ANTIGRAVITY", value: "1" },
@@ -300,6 +308,42 @@ it.layer(testLayer)("AntigravityDriver", (it) => {
         ).toEqual([[], []]);
         yield* h.assertClosed;
       }).pipe(Effect.scoped),
+  );
+
+  it.effect.skipIf(windowsHost)(
+    "authenticates with the configured API key method and labels the account by method",
+    () =>
+      Effect.gen(function* () {
+        const h = yield* makeHarness({
+          config: { authMethod: "gemini-api-key", apiKey: "fixture-gemini-key" },
+        });
+        yield* h.refresh();
+        const snapshot = yield* h.instance.snapshot.getSnapshot;
+        expect(snapshot.auth).toMatchObject({
+          status: "authenticated",
+          type: "gemini-api-key",
+          label: "Gemini API key",
+        });
+        expect(snapshot.models.length).toBeGreaterThan(0);
+        const nativeLaunches = h.launches.filter((launch) => launch.harnessPath !== undefined);
+        expect(nativeLaunches.map((launch) => launch.geminiApiKey)).toEqual(["fixture-gemini-key"]);
+        const requests = yield* h.readRequests;
+        expect(
+          requests
+            .filter((request) => request.method === "authenticate")
+            .map((request) => request.params?.methodId),
+        ).toEqual(["gemini-api-key"]);
+        yield* h.assertClosed;
+      }).pipe(Effect.scoped),
+  );
+
+  it.effect.skipIf(windowsHost)("reports the missing credential before launching a process", () =>
+    Effect.gen(function* () {
+      const h = yield* makeHarness({ config: { authMethod: "gemini-api-key" } });
+      const error = yield* h.refresh().pipe(Effect.flip);
+      expect(error.detail).toContain("API key");
+      expect(h.launches.filter((launch) => launch.harnessPath !== undefined)).toEqual([]);
+    }).pipe(Effect.scoped),
   );
 
   it.effect.skipIf(windowsHost)(

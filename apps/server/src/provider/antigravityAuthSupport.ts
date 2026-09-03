@@ -2,7 +2,7 @@ import * as NodeCrypto from "node:crypto";
 // @effect-diagnostics-next-line nodeBuiltinImport:off
 import * as NodePath from "node:path";
 
-import type { ProviderInstanceId } from "@t3tools/contracts";
+import type { AntigravityAuthMethod, ProviderInstanceId } from "@t3tools/contracts";
 import { HostProcessExecutablePath, HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -27,6 +27,15 @@ const maxAuthorizationUrlLength = 16_384;
 const maxStdoutLineBytes = 16 * 1024 * 1024;
 const authPrefixBytes = new TextEncoder().encode(ANTIGRAVITY_AUTH_STDOUT_PREFIX);
 const decodeUrl = Schema.decodeUnknownEffect(Schema.URLFromString);
+const ProfileSettingsFile = Schema.Struct({
+  gcp: Schema.optional(
+    Schema.Struct({
+      project: Schema.optional(Schema.String),
+      location: Schema.optional(Schema.String),
+    }),
+  ),
+});
+const encodeProfileSettings = Schema.encodeSync(Schema.fromJsonString(ProfileSettingsFile));
 const isAcpRequestError = Schema.is(AcpErrors.AcpRequestError);
 const isAcpTransportError = Schema.is(AcpErrors.AcpTransportError);
 
@@ -67,6 +76,74 @@ export interface AntigravityProfile {
   readonly browserCommand: string;
 }
 
+/**
+ * Credentials for the non-personal ACP auth methods. The agent reads the API
+ * key from its environment and the GCP project and location from
+ * `settings.json` in the profile. Empty strings mean "not set".
+ */
+export interface AntigravityAuthConfig {
+  readonly authMethod: AntigravityAuthMethod;
+  readonly apiKey: string;
+  readonly gcpProject: string;
+  readonly gcpLocation: string;
+}
+
+export const ANTIGRAVITY_PERSONAL_AUTH: AntigravityAuthConfig = {
+  authMethod: "oauth-personal",
+  apiKey: "",
+  gcpProject: "",
+  gcpLocation: "",
+};
+
+/** True for the two methods that open a Google sign-in page. */
+export function antigravityAuthUsesBrowser(authMethod: AntigravityAuthMethod): boolean {
+  return authMethod === "oauth-personal" || authMethod === "oauth-business";
+}
+
+/** Label shown on the provider card once the method has authenticated. */
+export function antigravityAuthLabel(authMethod: AntigravityAuthMethod): string {
+  switch (authMethod) {
+    case "oauth-personal":
+      return "Google account";
+    case "oauth-business":
+      return "Gemini Enterprise";
+    case "gemini-api-key":
+      return "Gemini API key";
+    case "agent-platform":
+      return "Agent Platform";
+  }
+}
+
+/**
+ * Explains what is missing before a non-personal method can authenticate, or
+ * null when the config is complete. Personal sign-in never needs config.
+ */
+export function antigravityAuthConfigIssue(auth: AntigravityAuthConfig): string | null {
+  switch (auth.authMethod) {
+    case "oauth-personal":
+      return null;
+    case "oauth-business":
+      return auth.gcpProject && auth.gcpLocation
+        ? null
+        : "Gemini Enterprise needs a GCP project and location in the Antigravity provider settings.";
+    case "gemini-api-key":
+      return auth.apiKey ? null : "Enter a Gemini API key in the Antigravity provider settings.";
+    case "agent-platform":
+      return auth.apiKey || (auth.gcpProject && auth.gcpLocation)
+        ? null
+        : "Agent Platform needs an API key, or a GCP project and location, in the Antigravity provider settings.";
+  }
+}
+
+/** `settings.json` content the agent reads for the GCP block. Never holds a credential. */
+export function antigravityProfileSettings(auth: AntigravityAuthConfig): string {
+  const gcp = {
+    ...(auth.gcpProject ? { project: auth.gcpProject } : {}),
+    ...(auth.gcpLocation ? { location: auth.gcpLocation } : {}),
+  };
+  return `${encodeProfileSettings(Object.keys(gcp).length > 0 ? { gcp } : {})}\n`;
+}
+
 export interface AntigravityAuthorizationUrl {
   readonly authorizationUrl: string;
   readonly redirectUri: string;
@@ -98,14 +175,28 @@ function quoteBrowserArgument(value: string): string {
   return `'${value.replaceAll("'", `'"'"'`)}'`;
 }
 
-function antigravityEnvironment(profile: AntigravityProfile, baseEnv: NodeJS.ProcessEnv) {
+function antigravityEnvironment(
+  profile: AntigravityProfile,
+  baseEnv: NodeJS.ProcessEnv,
+  auth: AntigravityAuthConfig,
+) {
   const environment: NodeJS.ProcessEnv = {};
   for (const [key, value] of Object.entries(baseEnv)) {
     // Windows treats environment keys as case-insensitive. Remove aliases too.
     if (!removedEnvironmentKeys.has(key.toUpperCase())) environment[key] = value;
   }
+  // Only the configured method's credential reaches the agent. The agent
+  // prefers GOOGLE_API_KEY over the GCP pair for Agent Platform, so the pair
+  // goes through settings.json instead of the environment.
+  const credential =
+    auth.authMethod === "gemini-api-key" && auth.apiKey
+      ? { GEMINI_API_KEY: auth.apiKey }
+      : auth.authMethod === "agent-platform" && auth.apiKey
+        ? { GOOGLE_API_KEY: auth.apiKey }
+        : {};
   return {
     ...environment,
+    ...credential,
     GEMINI_HOME: profile.geminiHome,
     AGY_ACP_FORCE_FILE_STORAGE: "1",
     BROWSER: profile.browserCommand,
@@ -120,7 +211,9 @@ export const prepareAntigravityProfile = Effect.fn("prepareAntigravityProfile")(
   readonly baseEnv?: NodeJS.ProcessEnv;
   readonly runtimeExecutablePath?: string;
   readonly platform?: NodeJS.Platform;
+  readonly auth?: AntigravityAuthConfig;
 }) {
+  const auth = input.auth ?? ANTIGRAVITY_PERSONAL_AUTH;
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
@@ -151,7 +244,7 @@ export const prepareAntigravityProfile = Effect.fn("prepareAntigravityProfile")(
     tokenPath: path.join(acpDirectory, "acp_token.json"),
     browserCommand,
   };
-  const environment = antigravityEnvironment(profile, input.baseEnv ?? process.env);
+  const environment = antigravityEnvironment(profile, input.baseEnv ?? process.env, auth);
   yield* Effect.gen(function* () {
     const child = yield* spawner.spawn(
       ChildProcess.make(helperExecutable, ["-e", browserHelperSource, "--", browserPreflightUrl], {
@@ -209,6 +302,16 @@ export const prepareAntigravityProfile = Effect.fn("prepareAntigravityProfile")(
         );
     }
   }
+  // The agent reads and rewrites settings.json itself (it records auth.type
+  // there after a sign-in), so only the GCP block is owned here. Rewriting on
+  // every launch keeps a project or location edit in Settings effective.
+  yield* fs
+    .writeFileString(path.join(acpDirectory, "settings.json"), antigravityProfileSettings(auth))
+    .pipe(
+      Effect.mapError(() =>
+        authSupportError("The Antigravity profile settings could not be written."),
+      ),
+    );
   return profile;
 });
 
@@ -221,13 +324,18 @@ export function buildAntigravityAcpSpawnInput(input: {
   readonly profile: AntigravityProfile;
   readonly cwd: string;
   readonly baseEnv?: NodeJS.ProcessEnv;
+  readonly auth?: AntigravityAuthConfig;
 }): AcpSpawnInput {
   return {
     command: input.installation.executablePath,
     args: input.profile.platform === "linux" ? ["--uid="] : [],
     cwd: input.cwd,
     env: {
-      ...antigravityEnvironment(input.profile, input.baseEnv ?? process.env),
+      ...antigravityEnvironment(
+        input.profile,
+        input.baseEnv ?? process.env,
+        input.auth ?? ANTIGRAVITY_PERSONAL_AUTH,
+      ),
       ANTIGRAVITY_HARNESS_PATH: input.installation.harnessPath,
     },
     extendEnv: false,

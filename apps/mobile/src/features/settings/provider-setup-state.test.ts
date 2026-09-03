@@ -96,6 +96,7 @@ describe("antigravityEnabledPatch", () => {
       providers: {
         ...DEFAULT_SERVER_SETTINGS.providers,
         antigravity: {
+          ...DEFAULT_SERVER_SETTINGS.providers.antigravity,
           enabled: false,
           binaryPath: "/opt/google/agy-acp",
           customModels: ["gemini-native"],

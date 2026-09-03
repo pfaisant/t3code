@@ -57,10 +57,14 @@ session's current model" and never sends it in `session/set_model`.
 
 ## Antigravity ownership and protocol
 
-[`AntigravityDriver`][antigravity] uses Google's official ACP executable with the
-`oauth-personal` method. It does not reuse CLI credentials, issue its own OAuth grant, or fall
-back to Gemini API or cloud billing. Antigravity is disabled by default and supports multiple
-provider instances. The open driver and instance identifiers require no database migration.
+[`AntigravityDriver`][antigravity] uses Google's official ACP executable. The instance config
+selects the ACP auth method: `oauth-personal` (default), `oauth-business`, `gemini-api-key`, or
+`agent-platform`. The two OAuth methods share the loopback sign-in flow below. The API key
+methods pass the configured key to the agent as `GEMINI_API_KEY` or `GOOGLE_API_KEY` and never
+open a browser. A GCP project and location are written to the profile's `settings.json` on each
+launch. The driver never reuses CLI credentials or ambient `GOOGLE_*` variables and never falls
+back to another method. Antigravity is disabled by default and supports multiple provider
+instances. The open driver and instance identifiers require no database migration.
 
 ### Runtime installation
 
@@ -251,6 +255,11 @@ attachment to the provider adapter. Each adapter decides what its provider inges
 
 - Codex, Claude, Cursor, and Grok send images as native image inputs and skip generic files. For
   these providers, generic files reach the agent only as file paths in the turn text.
+- Antigravity sends BMP, JPEG, PNG, and WebP images and common audio formats as native blocks,
+  text files as embedded resources, and PDFs as resource links. Other files are rejected with an
+  error instead of being dropped. The session advertises the ACP client file system capability,
+  so workspace reads and writes come back through `fs/read_text_file` and `fs/write_text_file`
+  and are confined to the workspace and the attachments directory.
 - OpenCode sends PNG/JPEG/GIF/WebP images, text files, and PDFs up to 20 MB as native file parts
   with their real mime type. Everything else (ZIP and other binaries, image formats model APIs
   reject, oversized files) falls back to the file path in the turn text, like the other providers.

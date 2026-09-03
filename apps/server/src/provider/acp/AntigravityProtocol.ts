@@ -59,19 +59,54 @@ export function selectAntigravityPermissionOptionId(
 }
 
 /** Copy truncated text so V8 cannot retain the original large string. */
+const SECURITY_WARNING_META_KEY = "agy.security.warning";
+const WARNING_TEXT_LIMIT = 512;
+const decodeSecurityWarning = Schema.decodeUnknownOption(
+  Schema.Struct({
+    title: Schema.optional(Schema.String),
+    message: Schema.optional(Schema.String),
+  }),
+);
+
+/**
+ * The agent marks "Allow Always" on shell and web tools with a prompt injection
+ * warning in `_meta`. Surface it as option text so both clients can show it.
+ */
+export function antigravitySecurityWarning(
+  option: EffectAcpSchema.PermissionOption,
+): string | undefined {
+  const meta = option._meta;
+  if (!Predicate.isObject(meta)) return undefined;
+  const warning = Option.getOrUndefined(decodeSecurityWarning(meta[SECURITY_WARNING_META_KEY]));
+  const text = warning?.message?.trim() || warning?.title?.trim();
+  if (!text) return undefined;
+  return text.length > WARNING_TEXT_LIMIT
+    ? copyBoundedText(`${text.slice(0, WARNING_TEXT_LIMIT - 3)}...`)
+    : text;
+}
+
 /** Only advertise decisions that the native request can honor. */
 export function antigravityApprovalOptions(
   request: EffectAcpSchema.RequestPermissionRequest,
 ): ReadonlyArray<ProviderApprovalOption> {
   if (isAntigravityUserInputRequest(request)) return [];
   const options: ProviderApprovalOption[] = [];
-  if (selectAntigravityPermissionOptionId(request, "accept") !== undefined) {
+  const optionWithKind = (kind: EffectAcpSchema.PermissionOption["kind"]) =>
+    request.options.find((entry) => entry.kind === kind && entry.optionId.trim());
+  const once = optionWithKind("allow_once");
+  if (once) {
     options.push({ decision: "accept", label: "Allow once" });
   }
-  if (selectAntigravityPermissionOptionId(request, "acceptForSession") !== undefined) {
-    options.push({ decision: "acceptForSession", label: "Allow for this thread" });
+  const always = optionWithKind("allow_always");
+  if (always) {
+    const warning = antigravitySecurityWarning(always);
+    options.push({
+      decision: "acceptForSession",
+      label: "Allow for this thread",
+      ...(warning ? { warning } : {}),
+    });
   }
-  if (selectAntigravityPermissionOptionId(request, "decline") !== undefined) {
+  if (optionWithKind("reject_once")) {
     options.push({ decision: "decline", label: "Deny" });
   }
   options.push({ decision: "cancel", label: "Cancel" });

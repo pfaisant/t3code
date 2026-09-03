@@ -18,14 +18,18 @@ import * as AcpErrors from "effect-acp/errors";
 
 import {
   ANTIGRAVITY_AUTH_STDOUT_PREFIX,
+  ANTIGRAVITY_PERSONAL_AUTH,
   ANTIGRAVITY_SIGN_IN_REQUIRED_MESSAGE,
+  type AntigravityAuthConfig,
+  antigravityAuthConfigIssue,
+  type AntigravityProfile,
+  antigravityProfileSettings,
   buildAntigravityAcpSpawnInput,
   isAntigravitySignInRequiredError,
   makeAntigravityStdoutTransform,
   parseAntigravityAuthorizationUrl,
   prepareAntigravityProfile,
   resolveAntigravityProfileDirectory,
-  type AntigravityProfile,
 } from "./antigravityAuthSupport.ts";
 
 const authorizationUrl =
@@ -35,6 +39,8 @@ const authorizationUrl =
 const authLine = `${ANTIGRAVITY_AUTH_STDOUT_PREFIX}${authorizationUrl}\n`;
 const encode = (text: string) => new TextEncoder().encode(text);
 const encodeUnknownJson = Schema.encodeUnknownSync(Schema.fromJsonString(Schema.Unknown));
+
+const decodeJson = Schema.decodeUnknownSync(Schema.fromJsonString(Schema.Unknown));
 
 describe("Antigravity process environment", () => {
   const profile: AntigravityProfile = {
@@ -94,6 +100,82 @@ describe("Antigravity process environment", () => {
         ELECTRON_RUN_AS_NODE: "1",
       },
     });
+  });
+
+  it("passes only the configured method's credential and keeps the GCP pair out of the environment", () => {
+    const baseEnv = { PATH: "/usr/bin", GOOGLE_API_KEY: "ambient-key" };
+    const spawnFor = (auth: AntigravityAuthConfig) =>
+      buildAntigravityAcpSpawnInput({
+        installation: { executablePath: "/release/acp", harnessPath: "/release/harness" },
+        profile,
+        cwd: "/project",
+        baseEnv,
+        auth,
+      }).env ?? {};
+
+    const geminiKey = spawnFor({
+      authMethod: "gemini-api-key",
+      apiKey: "gemini-secret",
+      gcpProject: "proj",
+      gcpLocation: "us-central1",
+    });
+    expect(geminiKey.GEMINI_API_KEY).toBe("gemini-secret");
+    expect(geminiKey.GOOGLE_API_KEY).toBeUndefined();
+    expect(geminiKey.GOOGLE_CLOUD_PROJECT).toBeUndefined();
+
+    const vertexKey = spawnFor({
+      authMethod: "agent-platform",
+      apiKey: "vertex-secret",
+      gcpProject: "",
+      gcpLocation: "",
+    });
+    expect(vertexKey.GOOGLE_API_KEY).toBe("vertex-secret");
+    expect(vertexKey.GEMINI_API_KEY).toBeUndefined();
+
+    const business = spawnFor({
+      authMethod: "oauth-business",
+      apiKey: "ignored",
+      gcpProject: "proj",
+      gcpLocation: "us-central1",
+    });
+    expect(business.GEMINI_API_KEY).toBeUndefined();
+    expect(business.GOOGLE_API_KEY).toBeUndefined();
+  });
+
+  it("writes only the GCP block into the agent's settings.json", () => {
+    expect(
+      decodeJson(
+        antigravityProfileSettings({
+          authMethod: "oauth-business",
+          apiKey: "never-written",
+          gcpProject: "proj",
+          gcpLocation: "us-central1",
+        }),
+      ),
+    ).toEqual({ gcp: { project: "proj", location: "us-central1" } });
+    expect(decodeJson(antigravityProfileSettings(ANTIGRAVITY_PERSONAL_AUTH))).toEqual({});
+  });
+
+  it("names the missing credential for each method", () => {
+    expect(antigravityAuthConfigIssue(ANTIGRAVITY_PERSONAL_AUTH)).toBeNull();
+    expect(
+      antigravityAuthConfigIssue({ ...ANTIGRAVITY_PERSONAL_AUTH, authMethod: "gemini-api-key" }),
+    ).toContain("API key");
+    expect(
+      antigravityAuthConfigIssue({
+        ...ANTIGRAVITY_PERSONAL_AUTH,
+        authMethod: "oauth-business",
+        gcpProject: "proj",
+      }),
+    ).toContain("location");
+    expect(
+      antigravityAuthConfigIssue({
+        ...ANTIGRAVITY_PERSONAL_AUTH,
+        authMethod: "agent-platform",
+        gcpProject: "proj",
+        gcpLocation: "us-central1",
+      }),
+    ).toBeNull();
   });
 
   it("uses the registry launch arguments for each supported host platform", () => {
@@ -321,6 +403,30 @@ it.layer(NodeServices.layer)("Antigravity profile preparation", (it) => {
       yield* fs.writeFileString(profile.tokenPath, "synthetic-token-fixture");
       yield* prepareAntigravityProfile({ profileDirectory: profile.geminiHome });
       expect(yield* fs.readFileString(profile.tokenPath)).toBe("synthetic-token-fixture");
+    }),
+  );
+
+  it.effect("rewrites the GCP block on every launch and never stores the API key", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const temporaryDirectory = yield* fs.makeTempDirectoryScoped();
+      const profile = yield* prepareAntigravityProfile({
+        profileDirectory: temporaryDirectory,
+        auth: {
+          authMethod: "agent-platform",
+          apiKey: "vertex-secret",
+          gcpProject: "proj",
+          gcpLocation: "us-central1",
+        },
+      });
+      const settingsPath = path.join(profile.acpDirectory, "settings.json");
+      const first = yield* fs.readFileString(settingsPath);
+      expect(decodeJson(first)).toEqual({ gcp: { project: "proj", location: "us-central1" } });
+      expect(first).not.toContain("vertex-secret");
+
+      yield* prepareAntigravityProfile({ profileDirectory: temporaryDirectory });
+      expect(decodeJson(yield* fs.readFileString(settingsPath))).toEqual({});
     }),
   );
 

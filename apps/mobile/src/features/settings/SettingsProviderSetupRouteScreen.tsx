@@ -2,6 +2,7 @@ import { useAtomValue } from "@effect/atom-react";
 import { useNavigation, type StaticScreenProps } from "@react-navigation/native";
 import type { AtomCommandResult } from "@t3tools/client-runtime/state/runtime";
 import {
+  ANTIGRAVITY_AUTH_METHODS,
   AuthOrchestrationOperateScope,
   EnvironmentId,
   ProviderInstanceId,
@@ -25,7 +26,11 @@ import { useEnvironmentQuery } from "../../state/query";
 import { serverEnvironment } from "../../state/server";
 import { environmentSession } from "../../state/session";
 import { useAtomCommand } from "../../state/use-atom-command";
-import { antigravityEnabledPatch, resolveProviderSignInPresentation } from "./provider-setup-state";
+import {
+  antigravityEnabledPatch,
+  readAntigravityAuthMethod,
+  resolveProviderSignInPresentation,
+} from "./provider-setup-state";
 
 export type ProviderSetupRouteParams = {
   readonly environmentId: EnvironmentId;
@@ -150,6 +155,14 @@ function ProviderSetupScreen({ environmentId, instanceId }: ProviderSetupRoutePa
     showSignOut,
     message: authMessage,
   } = resolveProviderSignInPresentation(provider, auth);
+  const authMethod = readAntigravityAuthMethod(
+    config?.settings.providerInstances[instanceId]?.config ??
+      (instanceId === "antigravity" ? config?.settings.providers.antigravity : undefined),
+  );
+  const usesBrowser = authMethod === "oauth-personal" || authMethod === "oauth-business";
+  const methodLabel =
+    ANTIGRAVITY_AUTH_METHODS.find((method) => method.value === authMethod)?.label ??
+    "Google account";
 
   // Return URLs never enter saved drafts, navigation params, or diagnostics.
   useEffect(() => {
@@ -355,21 +368,27 @@ function ProviderSetupScreen({ environmentId, instanceId }: ProviderSetupRoutePa
             ) : null}
             {provider.setup?.canAuthenticate ? (
               <View className="gap-3 border-t border-white/20 pt-4">
-                <Text className="text-lg font-t3-medium text-white">Google sign-in</Text>
+                <Text className="text-lg font-t3-medium text-white">{methodLabel}</Text>
                 <Text className="text-base text-white">
                   {signedIn
                     ? "Signed in. Credentials stay on this environment."
                     : provider.auth.status === "unknown"
-                      ? "Google sign-in has not been checked."
-                      : "Sign in with the Google account you use for Antigravity."}
+                      ? "Sign-in has not been checked."
+                      : usesBrowser
+                        ? "Sign in with the Google account you use for Antigravity."
+                        : "Connect with the credentials set in provider settings on web or desktop."}
                 </Text>
                 {authActive ? (
                   <>
                     <Text accessibilityLiveRegion="polite" className="text-base text-white">
                       {auth.phase === "starting"
-                        ? "Starting Google sign-in."
+                        ? usesBrowser
+                          ? "Starting Google sign-in."
+                          : "Checking credentials."
                         : auth.phase === "verifying"
-                          ? "Checking Google sign-in."
+                          ? usesBrowser
+                            ? "Checking Google sign-in."
+                            : "Checking credentials."
                           : auth.authorizationUrl
                             ? "Complete sign-in in your browser."
                             : "Sign-in is open on another client. Complete it there or wait for it to expire."}
@@ -472,12 +491,12 @@ function ProviderSetupScreen({ environmentId, instanceId }: ProviderSetupRoutePa
                   </>
                 ) : showSignOut ? (
                   <SetupButton
-                    label="Sign out of Google"
+                    label={usesBrowser ? "Sign out of Google" : "Disconnect"}
                     destructive
                     disabled={controlsDisabled}
                     onPress={() => {
                       Alert.alert(
-                        "Sign out of Google?",
+                        usesBrowser ? "Sign out of Google?" : "Disconnect Antigravity?",
                         `This stops Antigravity sessions for ${title} on ${environmentLabel}. Threads and files stay.`,
                         [
                           { text: "Cancel", style: "cancel" },
@@ -497,9 +516,13 @@ function ProviderSetupScreen({ environmentId, instanceId }: ProviderSetupRoutePa
                 ) : (
                   <SetupButton
                     label={
-                      auth?.phase === "failed" || auth?.phase === "cancelled"
-                        ? "Retry Google sign-in"
-                        : "Sign in with Google"
+                      usesBrowser
+                        ? auth?.phase === "failed" || auth?.phase === "cancelled"
+                          ? "Retry Google sign-in"
+                          : "Sign in with Google"
+                        : auth?.phase === "failed" || auth?.phase === "cancelled"
+                          ? "Retry connection"
+                          : "Connect"
                     }
                     primary
                     disabled={

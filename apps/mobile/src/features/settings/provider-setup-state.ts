@@ -1,10 +1,23 @@
 import {
+  ANTIGRAVITY_AUTH_METHODS,
+  type AntigravityAuthMethod,
   DEFAULT_SERVER_SETTINGS,
   type ProviderAuthState,
   type ServerProvider,
   type ServerSettings,
   type ServerSettingsPatch,
 } from "@t3tools/contracts";
+
+/** Read the configured method from an instance config. Unknown values fall back to personal. */
+export function readAntigravityAuthMethod(config: unknown): AntigravityAuthMethod {
+  const value =
+    config !== null && typeof config === "object" && "authMethod" in config
+      ? config.authMethod
+      : undefined;
+  return (
+    ANTIGRAVITY_AUTH_METHODS.find((method) => method.value === value)?.value ?? "oauth-personal"
+  );
+}
 
 /** A completed sign-in flow does not prove that saved credentials are still valid. */
 export function resolveProviderSignInPresentation(
