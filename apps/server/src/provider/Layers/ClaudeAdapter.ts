@@ -3842,6 +3842,9 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
 
     yield* stopSessionInternal(context, {
       emitExitEvent: true,
+      // The iterator has already ended, so this query cannot be reused even
+      // when the SDK's close bookkeeping throws.
+      continueOnCloseFailure: true,
     });
   });
 
@@ -3850,9 +3853,9 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     options?: {
       readonly emitExitEvent?: boolean;
       /**
-       * Finish the teardown even if close() throws. A stalled CLI must not
-       * survive as a reusable session just because closing it failed; the
-       * failure is logged and the next send boots a fresh process.
+       * Finish the teardown even if close() throws. A query that stalled or
+       * whose stream already ended must not survive as a reusable session;
+       * the failure is logged and the next send boots a fresh process.
        */
       readonly continueOnCloseFailure?: boolean;
     },

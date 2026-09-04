@@ -2897,6 +2897,8 @@ describe("ClaudeAdapterLive", () => {
       });
 
       // The CLI closes its stream on its own: no result, no error of its own.
+      // Its already-ended query cannot remain reusable if close bookkeeping throws.
+      harness.query.closeError = new Error("close failed");
       harness.query.finish();
 
       const completed = yield* Deferred.await(turnCompleted).pipe(
@@ -2913,6 +2915,7 @@ describe("ClaudeAdapterLive", () => {
       );
       const runtimeError = runtimeEvents.find((event) => event.type === "runtime.error");
       assert.equal(runtimeError?.type, "runtime.error");
+      assert.equal(harness.query.closeCalls, 1);
       assert.isTrue(runtimeEvents.some((event) => event.type === "session.exited"));
       assert.equal(yield* adapter.hasSession(THREAD_ID), false);
     }).pipe(
